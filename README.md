@@ -28,13 +28,13 @@ cd duckdb-paimon
 
 Note that `--recurse-submodules` will ensure DuckDB and paimon-cpp are pulled which are required to build the extension.
 
-## Building
+### Building
 
 ```shell
 GEN=ninja make
 ```
 
-## Running the extension
+### Running the extension
 
 To run the extension code, simply start the shell with `./build/release/duckdb`. This shell will have the extension pre-loaded.
 
@@ -60,8 +60,14 @@ D SELECT * FROM paimon_scan('./data/testdb.db/testtbl');
 
 The extension supports projection pushdown for efficient column selection.
 
-## Running the tests
+### Running the tests
 
 ```shell
 make test
 ```
+
+## Join the Community
+
+We welcome contributions and discussions! If you have questions, ideas, or want to connect with other users and developers, join our community by clicking [here](https://qr.dingtalk.com/action/joingroup?code=v1,k1,xL7wNtAi3J83o8gW/R+2vl0twZAzSwohxbXwCwQG6v8=&_dt_no_comment=1&origin=11) or scan the QR code below:
+
+<img src="./docs/group-qrcode.png" alt="DingTalk Group QR Code" width="240">
