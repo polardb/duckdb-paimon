@@ -115,7 +115,7 @@ SELECT * FROM paimon_scan('oss://your-bucket/warehouse', 'your_db', 'your_table'
 ```sql
 ATTACH 'oss://my-bucket/warehouse' AS paimon_lake (TYPE paimon);
 
-SHOW ALL TABLES IN paimon_lake;
+SHOW ALL TABLES;
 DESCRIBE paimon_lake.sales_db.orders;
 ```
 
