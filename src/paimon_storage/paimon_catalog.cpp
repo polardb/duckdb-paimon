@@ -55,11 +55,24 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 		auto sk = kv_secret.TryGetValue("secret").ToString();
 		auto endpoint = kv_secret.TryGetValue("endpoint").ToString();
 
+		// Extract bucket name from oss://bucketname/... path
+		const string oss_prefix = "oss://";
+		if (path.rfind(oss_prefix, 0) != 0) {
+			throw IOException("Paimon secret found but path is not an OSS path: " + path);
+		}
+		auto bucket_start = oss_prefix.size();
+		auto bucket_end = path.find('/', bucket_start);
+		string bucket =
+		    path.substr(bucket_start, bucket_end == string::npos ? string::npos : bucket_end - bucket_start);
+		if (bucket.empty()) {
+			throw IOException("Invalid OSS path, cannot extract bucket name: " + path);
+		}
+
 		paimon_options.insert({paimon::Options::FILE_SYSTEM, "jindo"});
 		paimon_options.insert({"fs.oss.user", "paimon"});
-		paimon_options.insert({"fs.oss.bucket.tablesync.accessKeyId", ak});
-		paimon_options.insert({"fs.oss.bucket.tablesync.accessKeySecret", sk});
-		paimon_options.insert({"fs.oss.bucket.tablesync.endpoint", endpoint});
+		paimon_options.insert({"fs.oss.bucket." + bucket + ".accessKeyId", ak});
+		paimon_options.insert({"fs.oss.bucket." + bucket + ".accessKeySecret", sk});
+		paimon_options.insert({"fs.oss.bucket." + bucket + ".endpoint", endpoint});
 	} else {
 		paimon_options.insert({paimon::Options::FILE_SYSTEM, "local"});
 	}
