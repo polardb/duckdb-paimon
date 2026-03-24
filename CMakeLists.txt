@@ -43,7 +43,7 @@ ExternalProject_Add(paimon_cpp_ep
     -DPAIMON_BUILD_TESTS=OFF
     -DPAIMON_BUILD_SHARED=ON
     -DPAIMON_BUILD_STATIC=OFF
-    -DPAIMON_ENABLE_JINDO=OFF
+    -DPAIMON_ENABLE_JINDO=ON
     -DPAIMON_ENABLE_ORC=ON
     -DPAIMON_ENABLE_AVRO=ON
     -DPAIMON_ENABLE_LUMINA=OFF
@@ -51,6 +51,8 @@ ExternalProject_Add(paimon_cpp_ep
   BUILD_BYPRODUCTS
     ${PAIMON_CPP_LIB}/libpaimon.so
     ${PAIMON_CPP_LIB}/libpaimon_local_file_system.so
+    ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system.so
+    ${PAIMON_CPP_LIB}/libjindosdk_c.so
     ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format.so
     ${PAIMON_CPP_LIB}/libpaimon_orc_file_format.so
     ${PAIMON_CPP_LIB}/libpaimon_avro_file_format.so
@@ -86,6 +88,8 @@ set(PAIMON_CPP_LIBS
   ${PAIMON_CPP_LIB}/libpaimon.so
   -Wl,--no-as-needed
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system.so
+  ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system.so
+  ${PAIMON_CPP_LIB}/libjindosdk_c.so
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format.so
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format.so
   ${PAIMON_CPP_LIB}/libpaimon_avro_file_format.so
