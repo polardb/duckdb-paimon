@@ -11,3 +11,6 @@ test/python/__pycache__/
 
 # Claude Code
 .claude/settings.local.json
+
+# Codex
+.codex
