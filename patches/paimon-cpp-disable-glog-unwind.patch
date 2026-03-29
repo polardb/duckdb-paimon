@@ -1,0 +1,11 @@
+diff --git a/cmake_modules/ThirdpartyToolchain.cmake b/cmake_modules/ThirdpartyToolchain.cmake
+--- a/cmake_modules/ThirdpartyToolchain.cmake
++++ b/cmake_modules/ThirdpartyToolchain.cmake
+@@ -1387,6 +1387,7 @@ macro(build_glog)
+         ${EP_COMMON_CMAKE_ARGS}
+         -DCMAKE_INSTALL_PREFIX=${GLOG_PREFIX}
+         -DWITH_GFLAGS=OFF
++        -DWITH_UNWIND=OFF
+         -DWITH_GTEST=OFF
+         -DCMAKE_CXX_FLAGS=${GLOG_CMAKE_CXX_FLAGS}
+         -DCMAKE_C_FLAGS=${GLOG_CMAKE_C_FLAGS})

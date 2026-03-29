@@ -1,0 +1,128 @@
+name: Release Paimon Extension Bundle
+
+env:
+  duckdb_version: v1.4.4
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-bundles:
+    name: Build and package (${{ matrix.bundle_arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle_arch: linux-amd64
+            runner: ubuntu-22.04
+          - bundle_arch: linux-arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set release tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "value=${{ inputs.tag }}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Ensure DuckDB version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C duckdb fetch --force --tags
+          git -C duckdb describe --tags --long
+
+      - name: Build extension (release)
+        shell: bash
+        run: |
+          GEN=ninja make
+
+      - name: Package release bundle
+        id: package
+        env:
+          EXT_DIR: build/release/extension/paimon
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.tag.outputs.value }}"
+          PKG_NAME="duckdb-paimon-${TAG}-${duckdb_version}-${{ matrix.bundle_arch }}"
+          STAGE_DIR="dist/${PKG_NAME}"
+
+          mkdir -p "${STAGE_DIR}"
+
+          cp "${EXT_DIR}/paimon.duckdb_extension" "${STAGE_DIR}/"
+          cp "${EXT_DIR}"/libpaimon*.so* "${STAGE_DIR}/"
+          cp "${EXT_DIR}"/libjindosdk_c.so* "${STAGE_DIR}/"
+
+          cp LICENSE "${STAGE_DIR}/LICENSE"
+          cp README.md "${STAGE_DIR}/README.md"
+
+          tar -C dist -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
+          sha256sum "dist/${PKG_NAME}.tar.gz" > "dist/${PKG_NAME}.tar.gz.sha256"
+
+          echo "archive=dist/${PKG_NAME}.tar.gz" >> "${GITHUB_OUTPUT}"
+          echo "checksum=dist/${PKG_NAME}.tar.gz.sha256" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.bundle_arch }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub release assets
+    runs-on: ubuntu-22.04
+    needs: build-bundles
+    steps:
+      - name: Set release tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "value=${{ inputs.tag }}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Download all packaged artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
