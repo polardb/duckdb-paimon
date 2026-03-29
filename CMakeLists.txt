@@ -22,7 +22,9 @@ set(PAIMON_CPP_LIB ${PAIMON_CPP_PREFIX}/lib64)
 file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 
 set(PAIMON_CPP_PATCHES
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch)
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-link-arrow-brotli-libs.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-disable-glog-unwind.patch)
 
 # Build patch command: apply each patch idempotently
 set(PAIMON_CPP_PATCH_SCRIPT "")
@@ -40,6 +42,7 @@ ExternalProject_Add(paimon_cpp_ep
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
     -DCMAKE_INSTALL_PREFIX=${PAIMON_CPP_PREFIX}
     -DCMAKE_INSTALL_LIBDIR=lib64
+    -DLIBUNWIND_LIBRARY=FALSE
     -DPAIMON_BUILD_TESTS=OFF
     -DPAIMON_BUILD_SHARED=ON
     -DPAIMON_BUILD_STATIC=OFF
@@ -98,6 +101,35 @@ set(PAIMON_CPP_LIBS
 )
 target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
+
+# Bundle paimon-cpp runtime dependencies next to paimon.duckdb_extension.
+set(PAIMON_CPP_RUNTIME_BUNDLE_LIBS
+  ${PAIMON_CPP_LIB}/libpaimon.so
+  ${PAIMON_CPP_LIB}/libpaimon_local_file_system.so
+  ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system.so
+  ${PAIMON_CPP_LIB}/libjindosdk_c.so.6
+  ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format.so
+  ${PAIMON_CPP_LIB}/libpaimon_orc_file_format.so
+  ${PAIMON_CPP_LIB}/libpaimon_avro_file_format.so
+  ${PAIMON_CPP_LIB}/libpaimon_blob_file_format.so
+)
+foreach(lib IN LISTS PAIMON_CPP_RUNTIME_BUNDLE_LIBS)
+  add_custom_command(
+    TARGET ${TARGET_NAME}_loadable_extension
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${lib}
+      $<TARGET_FILE_DIR:${TARGET_NAME}_loadable_extension>
+  )
+endforeach()
+
+# Make runtime library lookup relocatable for the shipped loadable extension.
+set_target_properties(${TARGET_NAME}_loadable_extension PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+  BUILD_WITH_INSTALL_RPATH ON
+  INSTALL_RPATH_USE_LINK_PATH OFF
+)
 
 install(
   TARGETS ${EXTENSION_NAME}
