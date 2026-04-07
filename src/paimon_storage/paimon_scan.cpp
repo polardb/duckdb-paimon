@@ -235,9 +235,7 @@ public:
 	PaimonScanLocalState(PaimonScanGlobalState &gstate, const PaimonScanBindData &bind_data,
 	                     vector<column_t> column_ids)
 	    : read_column_ids(column_ids.begin(), column_ids.end()), global_state(gstate), bind_data(bind_data) {
-		if (NextSplit()) {
-			chunk = make_shared_ptr<ArrowArrayWrapper>();
-		}
+		NextSplit();
 	}
 
 	~PaimonScanLocalState() override {
@@ -391,6 +389,7 @@ static unique_ptr<LocalTableFunctionState> PaimonScanInitLocal(ExecutionContext 
 static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &global_state = input.global_state->Cast<PaimonScanGlobalState>();
 	auto &local_state = input.local_state->Cast<PaimonScanLocalState>();
+	auto current_chunk = make_shared_ptr<ArrowArrayWrapper>();
 
 	auto batch = local_state.NextBatch();
 	if (paimon::BatchReader::IsEofBatch(batch)) {
@@ -398,7 +397,10 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 	}
 
 	auto &[c_array, c_schema] = batch;
-	auto current_chunk = make_shared_ptr<ArrowArrayWrapper>();
+	if (c_schema && c_schema->release) {
+		c_schema->release(c_schema.get());
+	}
+
 	current_chunk->arrow_array = *c_array;
 	c_array->release = nullptr;
 	local_state.chunk = current_chunk;
@@ -420,10 +422,6 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 		                                         current_chunk->arrow_array.offset, -1);
 		ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[col_idx], child_array, 0, array_state, output_size,
 		                                             arrow_type);
-	}
-
-	if (c_schema && c_schema->release) {
-		c_schema->release(c_schema.get());
 	}
 
 	output.Verify();
