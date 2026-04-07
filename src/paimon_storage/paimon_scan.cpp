@@ -398,8 +398,10 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 	}
 
 	auto &[c_array, c_schema] = batch;
-	local_state.chunk->arrow_array = *c_array;
+	auto current_chunk = make_shared_ptr<ArrowArrayWrapper>();
+	current_chunk->arrow_array = *c_array;
 	c_array->release = nullptr;
+	local_state.chunk = current_chunk;
 
 	auto output_size = MinValue<idx_t>(STANDARD_VECTOR_SIZE, NumericCast<idx_t>(c_array->length));
 	output.SetCardinality(output_size);
@@ -412,10 +414,10 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 		auto &arrow_type = *arrow_types.at(local_state.read_column_ids[col_idx]);
 
 		ArrowArrayScanState array_state(context);
-		array_state.owned_data = local_state.chunk;
+		array_state.owned_data = current_chunk;
 
 		ArrowToDuckDBConversion::SetValidityMask(output.data[col_idx], child_array, 0, output_size,
-		                                         local_state.chunk->arrow_array.offset, -1);
+		                                         current_chunk->arrow_array.offset, -1);
 		ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[col_idx], child_array, 0, array_state, output_size,
 		                                             arrow_type);
 	}
