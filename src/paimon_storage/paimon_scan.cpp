@@ -253,6 +253,7 @@ public:
 				throw IOException(batch_result.status().ToString());
 			}
 			auto batch = std::move(batch_result).value();
+			ReleaseCurrentBatch();
 
 			// current split exhausted, try to grab the next one
 			if (paimon::BatchReader::IsEofBatch(batch)) {
@@ -264,7 +265,6 @@ public:
 				continue;
 			}
 
-			ReleaseCurrentBatch();
 			return batch;
 		}
 
