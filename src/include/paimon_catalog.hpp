@@ -25,6 +25,7 @@
 #pragma once
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
@@ -80,9 +81,14 @@ public:
 		return *paimon_catalog;
 	}
 
+	const unordered_map<string, Value> &GetAttachOptions() const {
+		return attached_options;
+	}
+
 private:
 	string path;
 	AccessMode access_mode;
+	unordered_map<string, Value> attached_options;
 	unique_ptr<paimon::Catalog> paimon_catalog;
 	PaimonSchemaSet schemas;
 

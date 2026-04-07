@@ -23,6 +23,7 @@
  */
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -32,16 +33,54 @@
 #include "paimon_schema_entry.hpp"
 #include "paimon_transaction_manager.hpp"
 
+#include <algorithm>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace duckdb {
+
+static std::optional<string> TryGetPaimonOptionValue(const unordered_map<string, Value> &attached_options,
+                                                     const string &key) {
+	for (const auto &entry : attached_options) {
+		if (StringUtil::CIEquals(entry.first, key)) {
+			return entry.second.ToString();
+		}
+	}
+	return {};
+}
+
+static string GetValidatedFormatOption(const unordered_map<string, Value> &attached_options, const string &key,
+                                       const string &default_value, const vector<string> &supported_values) {
+	auto raw_value = TryGetPaimonOptionValue(attached_options, key);
+	if (!raw_value.has_value()) {
+		return default_value;
+	}
+
+	auto normalized_value = StringUtil::Lower(raw_value.value());
+	StringUtil::Trim(normalized_value);
+	if (normalized_value.empty()) {
+		throw InvalidInputException("Option \"%s\" cannot be empty", key);
+	}
+
+	if (std::find(supported_values.begin(), supported_values.end(), normalized_value) == supported_values.end()) {
+		throw InvalidInputException("Invalid value \"%s\" for option \"%s\". Supported values are: %s",
+		                            raw_value.value(), key, StringUtil::Join(supported_values, ", "));
+	}
+	return normalized_value;
+}
 
 map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, const string &path,
                                                     const unordered_map<string, Value> &attached_options) {
 	// default options
-	// TO DO: passed through options
-	map<string, string> paimon_options = {{paimon::Options::MANIFEST_FORMAT, "orc"},
-	                                      {paimon::Options::FILE_FORMAT, "parquet"}};
+	static const vector<string> supported_manifest_formats = {"avro", "orc", "parquet"};
+	static const vector<string> supported_file_formats = {"avro", "blob", "orc", "parquet"};
+
+	map<string, string> paimon_options = {
+	    {paimon::Options::MANIFEST_FORMAT,
+	     GetValidatedFormatOption(attached_options, "manifest_format", "avro", supported_manifest_formats)},
+	    {paimon::Options::FILE_FORMAT,
+	     GetValidatedFormatOption(attached_options, "file_format", "parquet", supported_file_formats)}};
 
 	// secret loading
 	auto &secret_manager = SecretManager::Get(context);
@@ -96,7 +135,7 @@ unique_ptr<paimon::Catalog> PaimonCatalog::CreatePaimonCatalog(ClientContext &co
 
 PaimonCatalog::PaimonCatalog(ClientContext &context, AttachedDatabase &db, const string &path,
                              const unordered_map<string, Value> &attach_options, AccessMode access_mode)
-    : Catalog(db), path(path), access_mode(access_mode),
+    : Catalog(db), path(path), access_mode(access_mode), attached_options(attach_options),
       paimon_catalog(CreatePaimonCatalog(context, path, attach_options)), schemas(*this) {
 }
 

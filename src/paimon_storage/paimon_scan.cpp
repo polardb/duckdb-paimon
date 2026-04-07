@@ -23,6 +23,7 @@
  */
 
 #include "duckdb.hpp"
+#include "duckdb/common/constants.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -183,8 +184,9 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		bind_data->warehouse = whole_path.substr(0, last_slash);
 	}
 
-	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, bind_data->warehouse, {});
-	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, bind_data->warehouse, {});
+	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
+	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, bind_data->warehouse, scan_options);
+	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, bind_data->warehouse, scan_options);
 
 	auto table_schema_result =
 	    paimon_catalog->LoadTableSchema(paimon::Identifier(bind_data->dbname, bind_data->tablename));
@@ -235,7 +237,19 @@ public:
 
 	PaimonScanLocalState(PaimonScanGlobalState &gstate, const PaimonScanBindData &bind_data,
 	                     vector<column_t> column_ids)
-	    : read_column_ids(column_ids.begin(), column_ids.end()), global_state(gstate), bind_data(bind_data) {
+	    : global_state(gstate), bind_data(bind_data) {
+		read_column_ids.reserve(column_ids.size());
+		auto column_count = bind_data.arrow_table.GetColumns().size();
+		for (auto column_id : column_ids) {
+			if (IsRowIdColumnId(column_id)) {
+				throw InvalidInputException("Paimon tables do not support selecting rowid");
+			}
+			if (column_id >= column_count) {
+				throw InvalidInputException("Invalid projected column id %llu for paimon scan",
+				                            NumericCast<unsigned long long>(column_id));
+			}
+			read_column_ids.push_back(NumericCast<int>(column_id));
+		}
 
 		NextSplit();
 	}
@@ -435,12 +449,16 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 
 	auto fun = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, PaimonScan,
 	                         PaimonScanBind, PaimonScanInitGlobal);
+	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR;
+	fun.named_parameters["file_format"] = LogicalType::VARCHAR;
 	fun.init_local = PaimonScanInitLocal;
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
 	function_set.AddFunction(fun);
 
 	auto fun_fullpath = TableFunction({LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
+	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR;
+	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;
 	fun_fullpath.init_local = PaimonScanInitLocal;
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;
