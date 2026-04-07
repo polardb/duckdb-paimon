@@ -29,6 +29,8 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
+#include "paimon_catalog.hpp"
+
 namespace duckdb {
 
 PaimonTableEntry::PaimonTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info)
@@ -56,6 +58,10 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 	vector<Value> inputs = {Value(catalog.GetDBPath()), Value(schema.name), Value(name)};
 
 	named_parameter_map_t param_map;
+	auto &paimon_catalog = catalog.Cast<PaimonCatalog>();
+	for (const auto &entry : paimon_catalog.GetAttachOptions()) {
+		param_map[entry.first] = entry.second;
+	}
 	vector<LogicalType> return_types;
 	vector<string> names;
 	TableFunctionRef empty_ref;
@@ -69,6 +75,14 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 
 TableStorageInfo PaimonTableEntry::GetStorageInfo(ClientContext &context) {
 	return TableStorageInfo();
+}
+
+virtual_column_map_t PaimonTableEntry::GetVirtualColumns() const {
+	return {};
+}
+
+vector<column_t> PaimonTableEntry::GetRowIdColumns() const {
+	return {};
 }
 
 } // namespace duckdb

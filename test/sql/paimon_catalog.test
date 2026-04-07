@@ -1,0 +1,26 @@
+# name: test/sql/paimon_catalog.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH './data' AS paimon_default (TYPE paimon);
+
+query I
+SELECT count(*) FROM paimon_default.avro_manifest.testtbl;
+----
+3
+
+statement ok
+DETACH paimon_default;
+
+statement ok
+ATTACH './data' AS paimon_lake (TYPE paimon, manifest_format 'avro');
+
+query I
+SELECT count(*) FROM paimon_lake.avro_manifest.testtbl;
+----
+3
+
+statement ok
+DETACH paimon_lake;

@@ -1,0 +1,35 @@
+{
+    "version": 3,
+    "id": 0,
+    "fields": [
+        {
+            "id": 0,
+            "name": "f0",
+            "type": "STRING"
+        },
+        {
+            "id": 1,
+            "name": "f1",
+            "type": "INT"
+        },
+        {
+            "id": 2,
+            "name": "f2",
+            "type": "INT"
+        },
+        {
+            "id": 3,
+            "name": "f3",
+            "type": "DOUBLE"
+        }
+    ],
+    "highestFieldId": 3,
+    "partitionKeys": [],
+    "primaryKeys": [],
+    "options": {
+        "file-system": "local",
+        "file.format": "parquet",
+        "manifest.format": "avro"
+    },
+    "timeMillis": 1775475418964
+}
