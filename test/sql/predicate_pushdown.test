@@ -1,0 +1,83 @@
+# name: test/sql/predicate_pushdown.test
+# group: [sql]
+
+require paimon
+
+# predicate pushdown: equality
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1;
+----
+Alice	1
+Bob	1
+Cathy	1
+
+# predicate pushdown: equality with no match
+query II
+SELECT f0, f3 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f3 = 16.0;
+----
+
+# predicate pushdown: AND with unconvertible child (partial pushdown)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1 AND length(f0) > 4;
+----
+Alice	1
+Cathy	1
+
+# predicate pushdown: AND narrows within a single file
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1 AND f2 = 0;
+----
+Alice	1	0
+
+# predicate pushdown: OR with unconvertible child (cannot be pushed down)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1 OR length(f0) > 4;
+----
+Alice	1
+Bob	1
+Cathy	1
+David	2
+Frank	2
+Grace	3
+Henry	3
+
+# predicate pushdown: OR across files (filtered unrelated partition)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1 OR f1 = 3;
+----
+Alice	1
+Bob	1
+Cathy	1
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: OR with no match on one branch (filtered impossible partition)
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1 OR f2 = 3;
+----
+Alice	1	0
+Bob	1	1
+Cathy	1	2
+
+# predicate pushdown: OR with overlapping results (fetch all partitions)
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1 OR f2 = 2;
+----
+Alice	1	0
+Bob	1	1
+Cathy	1	2
+Frank	2	2
+Iris	3	2
+
+# predicate pushdown: nested AND inside OR (filter unrelateds partition)
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE (f1 = 1 AND f2 = 0) OR (f1 = 3 AND f2 = 2);
+----
+Alice	1	0
+Iris	3	2
+
+# predicate pushdown: nested AND inside OR with no match (filter impossible partitions)
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE (f1 = 1 AND f2 = 3) OR (f1 = 3 AND f2 = 3);
+----
