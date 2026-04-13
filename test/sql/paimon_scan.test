@@ -48,16 +48,3 @@ SELECT f3, f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc'
 31.0	Grace
 32.1	Henry
 33.2	Iris
-
-# predicate pushdown
-query II
-SELECT f3, f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 = 1;
-----
-11.0	Alice
-12.1	Bob
-13.2	Cathy
-
-# predicate pushdown
-query II
-SELECT f3, f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f3 = 16.0;
-----

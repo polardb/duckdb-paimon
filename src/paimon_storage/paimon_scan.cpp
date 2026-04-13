@@ -28,6 +28,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -104,10 +105,51 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 }
 
+// Forward declaration for mutual recursion with TryConvertConjunction.
+static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get);
+
+static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConjunctionExpression &conj,
+                                                                LogicalGet &get) {
+	std::vector<std::shared_ptr<paimon::Predicate>> predicates;
+
+	for (auto &child : conj.children) {
+		auto pred = TryConvertExpression(*child, get);
+		if (pred) {
+			predicates.push_back(std::move(pred));
+			continue;
+		}
+
+		D_ASSERT(!pred);
+
+		// For AND: skip unconvertible children (they stay in DuckDB's filter).
+		// For OR: the entire OR must be convertible, otherwise give up.
+		if (conj.type == ExpressionType::CONJUNCTION_OR) {
+			return nullptr;
+		}
+	}
+
+	// No predicate parsed.
+	if (predicates.empty()) {
+		return nullptr;
+	}
+
+	if (conj.type == ExpressionType::CONJUNCTION_AND) {
+		auto result = paimon::PredicateBuilder::And(predicates);
+		return result.ok() ? std::move(result.value()) : nullptr;
+	} else if (conj.type == ExpressionType::CONJUNCTION_OR) {
+		auto result = paimon::PredicateBuilder::Or(predicates);
+		return result.ok() ? std::move(result.value()) : nullptr;
+	}
+
+	return nullptr;
+}
+
 static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_COMPARISON:
 		return TryConvertComparison(expr.Cast<BoundComparisonExpression>(), get);
+	case ExpressionClass::BOUND_CONJUNCTION:
+		return TryConvertConjunction(expr.Cast<BoundConjunctionExpression>(), get);
 	default:
 		return nullptr;
 	}
@@ -120,11 +162,9 @@ static void PaimonPushdownFilter(ClientContext &context, LogicalGet &get, Functi
 
 	for (idx_t i = 0; i < filters.size(); i++) {
 		auto pred = TryConvertExpression(*filters[i], get);
-		if (!pred) {
-			continue;
+		if (pred) {
+			predicates.push_back(std::move(pred));
 		}
-
-		predicates.push_back(std::move(pred));
 
 		// We do not remove the filter from DuckDB's filter list here.
 		// Although the predicate has been pushed down to paimon-cpp,
