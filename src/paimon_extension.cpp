@@ -28,7 +28,6 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 namespace duckdb {
@@ -52,7 +51,7 @@ static unique_ptr<BaseSecret> CreatePaimonSecretFromConfig(ClientContext &contex
 	result->TrySetValue("key_id", input);
 	result->TrySetValue("secret", input);
 
-	result->redact_keys.insert("secret");
+	result->redact_keys = {"key_id", "secret"};
 
 	return std::move(result);
 }
