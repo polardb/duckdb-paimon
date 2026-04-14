@@ -29,6 +29,7 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "paimon_catalog.hpp"
@@ -104,6 +105,72 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 }
 
+static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperatorExpression &op, LogicalGet &get) {
+	// Validate children count per operator type.
+	switch (op.type) {
+	case ExpressionType::COMPARE_IN:
+	case ExpressionType::COMPARE_NOT_IN:
+		D_ASSERT(op.children.size() >= 2);
+		break;
+	default:
+		return nullptr;
+	}
+
+	// We can only deal with column ref as the first child.
+	if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return nullptr;
+	}
+
+	// Get column index and name.
+	auto filter_binding_idx = op.children[0]->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto col_idx = get.GetColumnIds()[filter_binding_idx];
+	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
+	auto field_index = col_idx.GetPrimaryIndex();
+	auto &field_name = get.GetColumnName(col_idx);
+
+	switch (op.type) {
+	case ExpressionType::COMPARE_IN:
+	case ExpressionType::COMPARE_NOT_IN: {
+		// Collect literals from children[1..n].
+		std::vector<paimon::Literal> literals;
+		for (idx_t i = 1; i < op.children.size(); i++) {
+			if (op.children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+				// Best effort pushdown.
+				if (op.type == ExpressionType::COMPARE_NOT_IN) {
+					continue;
+				} else {
+					return nullptr;
+				}
+			}
+
+			auto val = op.children[i]->Cast<BoundConstantExpression>().value;
+			auto literal = PaimonTypeUtils::ConvertLiteral(val, paimon_type);
+			if (!literal) {
+				// Same reason as above: best effort pushdown.
+				if (op.type == ExpressionType::COMPARE_NOT_IN) {
+					continue;
+				} else {
+					return nullptr;
+				}
+			}
+			literals.push_back(std::move(literal.value()));
+		}
+
+		if (literals.empty()) {
+			return nullptr;
+		}
+
+		if (op.type == ExpressionType::COMPARE_IN) {
+			return paimon::PredicateBuilder::In(field_index, field_name, paimon_type, literals);
+		} else {
+			return paimon::PredicateBuilder::NotIn(field_index, field_name, paimon_type, literals);
+		}
+	}
+	default:
+		return nullptr;
+	}
+}
+
 // Forward declaration for mutual recursion with TryConvertConjunction.
 static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get);
 
@@ -149,6 +216,8 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 		return TryConvertComparison(expr.Cast<BoundComparisonExpression>(), get);
 	case ExpressionClass::BOUND_CONJUNCTION:
 		return TryConvertConjunction(expr.Cast<BoundConjunctionExpression>(), get);
+	case ExpressionClass::BOUND_OPERATOR:
+		return TryConvertOperator(expr.Cast<BoundOperatorExpression>(), get);
 	default:
 		return nullptr;
 	}
