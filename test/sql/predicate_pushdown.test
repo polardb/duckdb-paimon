@@ -81,3 +81,52 @@ Iris	3	2
 query III
 SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE (f1 = 1 AND f2 = 3) OR (f1 = 3 AND f2 = 3);
 ----
+
+# predicate pushdown: IN
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 IN (1, 3);
+----
+Alice	1
+Bob	1
+Cathy	1
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: IN with single value
+query II
+SELECT f0, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f2 IN (0);
+----
+Alice	0
+David	0
+Grace	0
+
+# predicate pushdown: IN with no match
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 IN (4, 5);
+----
+
+# predicate pushdown: NOT IN
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 NOT IN (1, 3);
+----
+David	2
+Eve	2
+Frank	2
+
+# predicate pushdown: IN combined with AND
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 IN (1, 2) AND f2 = 0;
+----
+Alice	1	0
+David	2	0
+
+# predicate pushdown: IN combined with OR
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 IN (1) OR f2 IN (2);
+----
+Alice	1	0
+Bob	1	1
+Cathy	1	2
+Frank	2	2
+Iris	3	2
