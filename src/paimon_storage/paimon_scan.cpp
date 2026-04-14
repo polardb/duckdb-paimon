@@ -25,7 +25,6 @@
 #include "duckdb.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/function/table/arrow.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
