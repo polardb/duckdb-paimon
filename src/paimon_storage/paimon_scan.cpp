@@ -112,6 +112,10 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 	case ExpressionType::COMPARE_NOT_IN:
 		D_ASSERT(op.children.size() >= 2);
 		break;
+	case ExpressionType::OPERATOR_IS_NULL:
+	case ExpressionType::OPERATOR_IS_NOT_NULL:
+		D_ASSERT(op.children.size() == 1);
+		break;
 	default:
 		return nullptr;
 	}
@@ -129,6 +133,10 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 	auto &field_name = get.GetColumnName(col_idx);
 
 	switch (op.type) {
+	case ExpressionType::OPERATOR_IS_NULL:
+		return paimon::PredicateBuilder::IsNull(field_index, field_name, paimon_type);
+	case ExpressionType::OPERATOR_IS_NOT_NULL:
+		return paimon::PredicateBuilder::IsNotNull(field_index, field_name, paimon_type);
 	case ExpressionType::COMPARE_IN:
 	case ExpressionType::COMPARE_NOT_IN: {
 		// Collect literals from children[1..n].

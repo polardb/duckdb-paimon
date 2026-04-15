@@ -130,3 +130,49 @@ Bob	1	1
 Cathy	1	2
 Frank	2	2
 Iris	3	2
+
+# predicate pushdown: IS NULL (no nulls in test data, expect empty result)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 IS NULL;
+----
+
+# predicate pushdown: IS NOT NULL (no nulls in test data, expect all rows)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 IS NOT NULL;
+----
+Alice	1
+Bob	1
+Cathy	1
+David	2
+Eve	2
+Frank	2
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: IS NULL on integer column
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 IS NULL;
+----
+
+# predicate pushdown: IS NOT NULL combined with AND
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 IS NOT NULL AND f1 = 1;
+----
+Alice	1
+Bob	1
+Cathy	1
+
+# predicate pushdown: IS NOT NULL combined with OR
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 IS NOT NULL OR f1 = 1;
+----
+Alice	1
+Bob	1
+Cathy	1
+David	2
+Eve	2
+Frank	2
+Grace	3
+Henry	3
+Iris	3
