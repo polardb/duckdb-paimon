@@ -131,6 +131,84 @@ Cathy	1	2
 Frank	2	2
 Iris	3	2
 
+# predicate pushdown: not equal
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 != 2;
+----
+Alice	1
+Bob	1
+Cathy	1
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: less than
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 < 2;
+----
+Alice	1
+Bob	1
+Cathy	1
+
+# predicate pushdown: less than or equal
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 <= 2;
+----
+Alice	1
+Bob	1
+Cathy	1
+David	2
+Eve	2
+Frank	2
+
+# predicate pushdown: greater than
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 > 2;
+----
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: greater than or equal
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 >= 2;
+----
+David	2
+Eve	2
+Frank	2
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: range filter with less than and greater than combined
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 >= 2 AND f2 < 2;
+----
+David	2	0
+Eve	2	1
+Grace	3	0
+Henry	3	1
+
+# predicate pushdown: not equal combined with OR
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 != 2 OR f2 = 0;
+----
+Alice	1	0
+Bob	1	1
+Cathy	1	2
+David	2	0
+Grace	3	0
+Henry	3	1
+Iris	3	2
+
+# predicate pushdown: constant on left side (flipped comparison)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE 2 < f1;
+----
+Grace	3
+Henry	3
+Iris	3
+
 # predicate pushdown: IS NULL (no nulls in test data, expect empty result)
 query II
 SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 IS NULL;
