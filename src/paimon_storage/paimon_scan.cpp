@@ -60,9 +60,14 @@ public:
 };
 
 static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundComparisonExpression &comp, LogicalGet &get) {
-	// early exit
+	// early exit: only handle comparison types supported by paimon-cpp
 	switch (comp.type) {
 	case ExpressionType::COMPARE_EQUAL:
+	case ExpressionType::COMPARE_NOTEQUAL:
+	case ExpressionType::COMPARE_LESSTHAN:
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+	case ExpressionType::COMPARE_GREATERTHAN:
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
 		break;
 	default:
 		return nullptr;
@@ -96,10 +101,22 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 		return nullptr;
 	}
 
+	auto field_index = col_idx.GetPrimaryIndex();
+	auto &field_name = get.GetColumnName(col_idx);
+
 	switch (comparison_type) {
 	case ExpressionType::COMPARE_EQUAL:
-		return paimon::PredicateBuilder::Equal(col_idx.GetPrimaryIndex(), get.GetColumnName(col_idx), paimon_type,
-		                                       literal.value());
+		return paimon::PredicateBuilder::Equal(field_index, field_name, paimon_type, literal.value());
+	case ExpressionType::COMPARE_NOTEQUAL:
+		return paimon::PredicateBuilder::NotEqual(field_index, field_name, paimon_type, literal.value());
+	case ExpressionType::COMPARE_LESSTHAN:
+		return paimon::PredicateBuilder::LessThan(field_index, field_name, paimon_type, literal.value());
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		return paimon::PredicateBuilder::LessOrEqual(field_index, field_name, paimon_type, literal.value());
+	case ExpressionType::COMPARE_GREATERTHAN:
+		return paimon::PredicateBuilder::GreaterThan(field_index, field_name, paimon_type, literal.value());
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		return paimon::PredicateBuilder::GreaterOrEqual(field_index, field_name, paimon_type, literal.value());
 	default:
 		return nullptr;
 	}
