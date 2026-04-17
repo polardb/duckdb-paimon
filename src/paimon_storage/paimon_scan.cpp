@@ -29,6 +29,7 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -122,6 +123,47 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 }
 
+static std::shared_ptr<paimon::Predicate> TryConvertBetween(const BoundBetweenExpression &between, LogicalGet &get) {
+	if (between.input->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+	    between.lower->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
+	    between.upper->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return nullptr;
+	}
+
+	auto filter_binding_idx = between.input->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto col_idx = get.GetColumnIds()[filter_binding_idx];
+	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
+
+	auto lower_literal =
+	    PaimonTypeUtils::ConvertLiteral(between.lower->Cast<BoundConstantExpression>().value, paimon_type);
+	auto upper_literal =
+	    PaimonTypeUtils::ConvertLiteral(between.upper->Cast<BoundConstantExpression>().value, paimon_type);
+	if (!lower_literal || !upper_literal) {
+		return nullptr;
+	}
+
+	auto field_index = col_idx.GetPrimaryIndex();
+	auto &field_name = get.GetColumnName(col_idx);
+
+	// Decompose into two comparison predicates combined with AND.  paimon-cpp's
+	// Between() is itself just GreaterOrEqual + LessOrEqual + And, so there is no
+	// benefit in special-casing inclusive bounds — this unified path handles every
+	// combination (inclusive, exclusive, or mixed) produced by the optimizer.
+	auto lower_pred =
+	    between.lower_inclusive
+	        ? paimon::PredicateBuilder::GreaterOrEqual(field_index, field_name, paimon_type, lower_literal.value())
+	        : paimon::PredicateBuilder::GreaterThan(field_index, field_name, paimon_type, lower_literal.value());
+	auto upper_pred =
+	    between.upper_inclusive
+	        ? paimon::PredicateBuilder::LessOrEqual(field_index, field_name, paimon_type, upper_literal.value())
+	        : paimon::PredicateBuilder::LessThan(field_index, field_name, paimon_type, upper_literal.value());
+	auto result = paimon::PredicateBuilder::And({lower_pred, upper_pred});
+	return result.ok() ? std::move(result.value()) : nullptr;
+}
+
+// Forward declaration for mutual recursion with TryConvertOperator.
+static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get);
+
 static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperatorExpression &op, LogicalGet &get) {
 	// Validate children count per operator type.
 	switch (op.type) {
@@ -131,13 +173,24 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 		break;
 	case ExpressionType::OPERATOR_IS_NULL:
 	case ExpressionType::OPERATOR_IS_NOT_NULL:
+	case ExpressionType::OPERATOR_NOT:
 		D_ASSERT(op.children.size() == 1);
 		break;
 	default:
 		return nullptr;
 	}
 
-	// We can only deal with column ref as the first child.
+	// NOT wraps an arbitrary sub-expression; handle it before the column-ref gate.
+	if (op.type == ExpressionType::OPERATOR_NOT) {
+		auto child_pred = TryConvertExpression(*op.children[0], get);
+		if (!child_pred) {
+			return nullptr;
+		}
+		auto result = paimon::PredicateBuilder::Not(child_pred);
+		return result.ok() ? std::move(result.value()) : nullptr;
+	}
+
+	// From here on, the first child must be a column reference.
 	if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 		return nullptr;
 	}
@@ -196,9 +249,6 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 	}
 }
 
-// Forward declaration for mutual recursion with TryConvertConjunction.
-static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get);
-
 static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConjunctionExpression &conj,
                                                                 LogicalGet &get) {
 	std::vector<std::shared_ptr<paimon::Predicate>> predicates;
@@ -241,6 +291,8 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 		return TryConvertComparison(expr.Cast<BoundComparisonExpression>(), get);
 	case ExpressionClass::BOUND_CONJUNCTION:
 		return TryConvertConjunction(expr.Cast<BoundConjunctionExpression>(), get);
+	case ExpressionClass::BOUND_BETWEEN:
+		return TryConvertBetween(expr.Cast<BoundBetweenExpression>(), get);
 	case ExpressionClass::BOUND_OPERATOR:
 		return TryConvertOperator(expr.Cast<BoundOperatorExpression>(), get);
 	default:
