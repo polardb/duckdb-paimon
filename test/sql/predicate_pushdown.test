@@ -254,3 +254,64 @@ Frank	2
 Grace	3
 Henry	3
 Iris	3
+
+# predicate pushdown: BETWEEN (inclusive on both ends)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 BETWEEN 1 AND 2;
+----
+Alice	1
+Bob	1
+Cathy	1
+David	2
+Eve	2
+Frank	2
+
+# predicate pushdown: NOT BETWEEN
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 NOT BETWEEN 1 AND 2;
+----
+Grace	3
+Henry	3
+Iris	3
+
+# predicate pushdown: BETWEEN on second column
+query III
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f2 BETWEEN 1 AND 2;
+----
+Bob	1	1
+Cathy	1	2
+Eve	2	1
+Frank	2	2
+Henry	3	1
+Iris	3	2
+
+# predicate pushdown: exclusive range (x > a AND x < b) — optimizer may merge
+# into a non-inclusive BoundBetweenExpression; must still push down correctly.
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 > 1 AND f1 < 3;
+----
+David	2
+Eve	2
+Frank	2
+
+# predicate pushdown: half-open range (x >= a AND x < b)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 >= 1 AND f1 < 3;
+----
+Alice	1
+Bob	1
+Cathy	1
+David	2
+Eve	2
+Frank	2
+
+# predicate pushdown: half-open range (x > a AND x <= b)
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f1 > 1 AND f1 <= 3;
+----
+David	2
+Eve	2
+Frank	2
+Grace	3
+Henry	3
+Iris	3
