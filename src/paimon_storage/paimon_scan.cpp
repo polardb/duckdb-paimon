@@ -28,6 +28,7 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
@@ -285,6 +286,100 @@ static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConju
 	return nullptr;
 }
 
+// Supported function types for predicate pushdown.
+// DuckDB's LikeOptimizationRule rewrites LIKE into optimized functions:
+//   LIKE 'abc%'  → prefix(col, 'abc')   → StartsWith
+//   LIKE '%abc'  → suffix(col, 'abc')   → EndsWith
+//   LIKE '%abc%' → contains(col, 'abc') → Contains
+// The optimizer strips '%' from the pattern, matching paimon-cpp's expectation.
+// Unrewritten LIKE ('~~') keeps the full pattern (with % and _).
+enum class PushdownFunction : uint8_t { PREFIX, SUFFIX, CONTAINS, LIKE, UNSUPPORTED };
+
+static PushdownFunction ClassifyFunction(const string &name) {
+	if (name == "prefix") {
+		return PushdownFunction::PREFIX;
+	} else if (name == "suffix") {
+		return PushdownFunction::SUFFIX;
+	} else if (name == "contains") {
+		return PushdownFunction::CONTAINS;
+	} else if (name == "~~") {
+		return PushdownFunction::LIKE;
+	}
+	return PushdownFunction::UNSUPPORTED;
+}
+
+static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunctionExpression &func, LogicalGet &get) {
+	// Gate: reject unsupported functions early.
+	auto func_type = ClassifyFunction(func.function.name);
+	if (func_type == PushdownFunction::UNSUPPORTED) {
+		return nullptr;
+	}
+
+	// All supported functions need at least a column ref as the first argument.
+	D_ASSERT(func.children.size() >= 1);
+	if (func.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return nullptr;
+	}
+
+	// Extract column metadata.
+	auto filter_binding_idx = func.children[0]->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto col_idx = get.GetColumnIds()[filter_binding_idx];
+	auto field_index = col_idx.GetPrimaryIndex();
+	auto &field_name = get.GetColumnName(col_idx);
+	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
+
+	// Per-category validation and argument extraction.
+	std::optional<paimon::Literal> pattern_literal;
+
+	switch (func_type) {
+	case PushdownFunction::PREFIX:
+	case PushdownFunction::SUFFIX:
+	case PushdownFunction::CONTAINS:
+	case PushdownFunction::LIKE: {
+		// LIKE-family: require STRING field and a constant pattern argument.
+		if (paimon_type != paimon::FieldType::STRING) {
+			return nullptr;
+		}
+		D_ASSERT(func.children.size() == 2);
+		if (func.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return nullptr;
+		}
+
+		auto &pattern_value = func.children[1]->Cast<BoundConstantExpression>().value;
+		pattern_literal = PaimonTypeUtils::ConvertLiteral(pattern_value, paimon_type);
+		if (!pattern_literal) {
+			return nullptr;
+		}
+		break;
+	}
+	default:
+		return nullptr;
+	}
+
+	// Dispatch to the corresponding paimon-cpp predicate builder.
+	switch (func_type) {
+	case PushdownFunction::PREFIX: {
+		auto result =
+		    paimon::PredicateBuilder::StartsWith(field_index, field_name, paimon_type, pattern_literal.value());
+		return result.ok() ? std::move(result.value()) : nullptr;
+	}
+	case PushdownFunction::SUFFIX: {
+		auto result = paimon::PredicateBuilder::EndsWith(field_index, field_name, paimon_type, pattern_literal.value());
+		return result.ok() ? std::move(result.value()) : nullptr;
+	}
+	case PushdownFunction::CONTAINS: {
+		auto result = paimon::PredicateBuilder::Contains(field_index, field_name, paimon_type, pattern_literal.value());
+		return result.ok() ? std::move(result.value()) : nullptr;
+	}
+	case PushdownFunction::LIKE: {
+		auto result = paimon::PredicateBuilder::Like(field_index, field_name, paimon_type, pattern_literal.value());
+		return result.ok() ? std::move(result.value()) : nullptr;
+	}
+	default:
+		return nullptr;
+	}
+}
+
 static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_COMPARISON:
@@ -295,6 +390,8 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 		return TryConvertBetween(expr.Cast<BoundBetweenExpression>(), get);
 	case ExpressionClass::BOUND_OPERATOR:
 		return TryConvertOperator(expr.Cast<BoundOperatorExpression>(), get);
+	case ExpressionClass::BOUND_FUNCTION:
+		return TryConvertFunction(expr.Cast<BoundFunctionExpression>(), get);
 	default:
 		return nullptr;
 	}
