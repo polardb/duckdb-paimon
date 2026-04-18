@@ -315,3 +315,45 @@ Frank	2
 Grace	3
 Henry	3
 Iris	3
+
+# predicate pushdown: LIKE prefix (optimizer rewrites to prefix())
+query I
+SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 LIKE 'A%';
+----
+Alice
+
+# predicate pushdown: LIKE suffix (optimizer rewrites to suffix())
+query I
+SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 LIKE '%e';
+----
+Alice
+Eve
+Grace
+
+# predicate pushdown: LIKE contains (optimizer rewrites to contains())
+query I
+SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 LIKE '%a%';
+----
+Cathy
+David
+Frank
+Grace
+
+# predicate pushdown: LIKE complex pattern (not optimized, stays as ~~)
+query I
+SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 LIKE '_l%';
+----
+Alice
+
+# predicate pushdown: NOT LIKE prefix (optimizer rewrites to NOT(prefix()))
+query I
+SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc') WHERE f0 NOT LIKE 'A%';
+----
+Bob
+Cathy
+David
+Eve
+Frank
+Grace
+Henry
+Iris
