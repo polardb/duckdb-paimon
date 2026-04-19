@@ -23,6 +23,7 @@ This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon
 
 - Read Paimon table data (local and remote OSS)
 - Projection pushdown optimization
+- Predicate pushdown optimization
 - Multiple file format support (Parquet data files, ORC manifest files)
 - Catalog ATTACH support
 - DuckDB Secret-based OSS credential management
