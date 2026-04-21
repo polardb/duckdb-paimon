@@ -1,0 +1,75 @@
+{
+    "version": 3,
+    "id": 0,
+    "fields": [
+        {
+            "id": 0,
+            "name": "col_boolean",
+            "type": "BOOLEAN"
+        },
+        {
+            "id": 1,
+            "name": "col_tinyint",
+            "type": "TINYINT"
+        },
+        {
+            "id": 2,
+            "name": "col_smallint",
+            "type": "SMALLINT"
+        },
+        {
+            "id": 3,
+            "name": "col_int",
+            "type": "INT"
+        },
+        {
+            "id": 4,
+            "name": "col_bigint",
+            "type": "BIGINT"
+        },
+        {
+            "id": 5,
+            "name": "col_float",
+            "type": "FLOAT"
+        },
+        {
+            "id": 6,
+            "name": "col_double",
+            "type": "DOUBLE"
+        },
+        {
+            "id": 7,
+            "name": "col_string",
+            "type": "STRING"
+        },
+        {
+            "id": 8,
+            "name": "col_date",
+            "type": "DATE"
+        },
+        {
+            "id": 9,
+            "name": "col_timestamp",
+            "type": "TIMESTAMP(3)"
+        },
+        {
+            "id": 10,
+            "name": "col_decimal",
+            "type": "DECIMAL(10, 2)"
+        },
+        {
+            "id": 11,
+            "name": "col_binary",
+            "type": "BYTES"
+        }
+    ],
+    "highestFieldId": 11,
+    "partitionKeys": [],
+    "primaryKeys": [],
+    "options": {
+        "file-system": "local",
+        "file.format": "parquet",
+        "manifest.format": "orc"
+    },
+    "timeMillis": 1776670493607
+}
