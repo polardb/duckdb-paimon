@@ -26,6 +26,8 @@
 
 #include "duckdb.hpp"
 
+#include "paimon/data/decimal.h"
+#include "paimon/data/timestamp.h"
 #include "paimon/defs.h"
 #include "paimon/predicate/literal.h"
 
