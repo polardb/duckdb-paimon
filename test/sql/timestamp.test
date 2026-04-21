@@ -1,0 +1,147 @@
+# name: test/sql/timestamp.test
+# description: Test TIMESTAMP type mapping and predicate pushdown
+# group: [sql]
+
+require paimon
+
+# --------------------------------------------------------------------------
+# Table: data/testdb.db/type_test_tbl
+# Column: col_timestamp TIMESTAMP(3) -> DuckDB TIMESTAMP_MS
+#
+# Data (10 rows, row 10 = NULL):
+#   row 1:  2025-01-15 10:30:00  (Alice)
+#   row 2:  2025-03-20 14:15:30  (Bob)
+#   row 3:  2025-06-01 08:00:00  (Cathy)
+#   row 4:  2025-07-04 12:00:00  (David)
+#   row 5:  2025-09-10 16:45:00  (Eve)
+#   row 6:  2025-11-25 20:30:00  (Frank)
+#   row 7:  2026-01-01 00:00:00  (Grace)
+#   row 8:  2026-02-14 09:30:00  (Henry)
+#   row 9:  2026-04-20 18:00:00  (Iris)
+#   row 10: NULL                 (NULL)
+# --------------------------------------------------------------------------
+
+# equality
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp = TIMESTAMP '2025-01-15 10:30:00';
+----
+Alice	2025-01-15 10:30:00
+
+# equality with no match
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp = TIMESTAMP '2099-01-01 00:00:00';
+----
+
+# not equal
+query I
+SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp != TIMESTAMP '2025-01-15 10:30:00' ORDER BY col_string;
+----
+Bob
+Cathy
+David
+Eve
+Frank
+Grace
+Henry
+Iris
+
+# greater than
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp > TIMESTAMP '2025-12-31 23:59:59';
+----
+Grace	2026-01-01 00:00:00
+Henry	2026-02-14 09:30:00
+Iris	2026-04-20 18:00:00
+
+# less than
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp < TIMESTAMP '2025-03-21 00:00:00';
+----
+Alice	2025-01-15 10:30:00
+Bob	2025-03-20 14:15:30
+
+# greater than or equal
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp >= TIMESTAMP '2025-11-25 20:30:00';
+----
+Frank	2025-11-25 20:30:00
+Grace	2026-01-01 00:00:00
+Henry	2026-02-14 09:30:00
+Iris	2026-04-20 18:00:00
+
+# less than or equal
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp <= TIMESTAMP '2025-03-20 14:15:30';
+----
+Alice	2025-01-15 10:30:00
+Bob	2025-03-20 14:15:30
+
+# range with AND
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp >= TIMESTAMP '2025-06-01 00:00:00' AND col_timestamp <= TIMESTAMP '2025-11-25 20:30:00';
+----
+Cathy	2025-06-01 08:00:00
+David	2025-07-04 12:00:00
+Eve	2025-09-10 16:45:00
+Frank	2025-11-25 20:30:00
+
+# BETWEEN
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp BETWEEN TIMESTAMP '2025-07-01 00:00:00' AND TIMESTAMP '2026-01-01 00:00:00';
+----
+David	2025-07-04 12:00:00
+Eve	2025-09-10 16:45:00
+Frank	2025-11-25 20:30:00
+Grace	2026-01-01 00:00:00
+
+# IN list
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp IN (TIMESTAMP '2025-01-15 10:30:00', TIMESTAMP '2025-09-10 16:45:00', TIMESTAMP '2026-04-20 18:00:00');
+----
+Alice	2025-01-15 10:30:00
+Eve	2025-09-10 16:45:00
+Iris	2026-04-20 18:00:00
+
+# IS NULL (row 10 has NULL timestamp)
+query I
+SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp IS NULL;
+----
+NULL
+
+# IS NOT NULL (rows 1-9 have non-NULL timestamps)
+query I
+SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp IS NOT NULL ORDER BY col_string;
+----
+Alice
+Bob
+Cathy
+David
+Eve
+Frank
+Grace
+Henry
+Iris
+
+# constant on left side (flipped comparison)
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE TIMESTAMP '2025-12-31 23:59:59' < col_timestamp;
+----
+Grace	2026-01-01 00:00:00
+Henry	2026-02-14 09:30:00
+Iris	2026-04-20 18:00:00
+
+# combined: timestamp AND integer
+query III
+SELECT col_string, col_timestamp, col_int FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp > TIMESTAMP '2025-06-01 00:00:00' AND col_int > 0 ORDER BY col_string;
+----
+Cathy	2025-06-01 08:00:00	3000
+Eve	2025-09-10 16:45:00	100000
+Henry	2026-02-14 09:30:00	54321
+Iris	2026-04-20 18:00:00	9999
+
+# combined: timestamp OR string
+query II
+SELECT col_string, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_timestamp = TIMESTAMP '2025-01-15 10:30:00' OR col_string = 'Iris';
+----
+Alice	2025-01-15 10:30:00
+Iris	2026-04-20 18:00:00

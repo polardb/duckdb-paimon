@@ -47,6 +47,10 @@ paimon::FieldType PaimonTypeUtils::ConvertFieldType(const LogicalType &type) {
 	case LogicalTypeId::BLOB:
 		return paimon::FieldType::BINARY;
 	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_NS:
 		return paimon::FieldType::TIMESTAMP;
 	case LogicalTypeId::DECIMAL:
 		return paimon::FieldType::DECIMAL;
@@ -83,6 +87,57 @@ std::optional<paimon::Literal> PaimonTypeUtils::ConvertLiteral(const Value &valu
 	}
 	case paimon::FieldType::DATE:
 		return paimon::Literal(paimon::FieldType::DATE, value.GetValue<int32_t>());
+	case paimon::FieldType::TIMESTAMP: {
+		int64_t millis;
+		int32_t nano_of_millis;
+		switch (value.type().id()) {
+		case LogicalTypeId::TIMESTAMP_MS:
+			millis = value.GetValue<timestamp_t>().value;
+			nano_of_millis = 0;
+			break;
+		case LogicalTypeId::TIMESTAMP_SEC:
+			millis = value.GetValue<timestamp_t>().value * 1000;
+			nano_of_millis = 0;
+			break;
+		case LogicalTypeId::TIMESTAMP_NS: {
+			auto nanos = value.GetValue<timestamp_t>().value;
+			millis = nanos / 1000000 - (nanos % 1000000 < 0 ? 1 : 0);
+			nano_of_millis = static_cast<int32_t>(nanos - millis * 1000000);
+			break;
+		}
+		default: {
+			auto micros = value.GetValue<timestamp_t>().value;
+			millis = micros / 1000 - (micros % 1000 < 0 ? 1 : 0);
+			nano_of_millis = static_cast<int32_t>((micros - millis * 1000) * 1000);
+			break;
+		}
+		}
+		return paimon::Literal(paimon::Timestamp::FromEpochMillis(millis, nano_of_millis));
+	}
+	case paimon::FieldType::DECIMAL: {
+		auto width = DecimalType::GetWidth(value.type());
+		auto scale = DecimalType::GetScale(value.type());
+		hugeint_t hugeint_val;
+		switch (value.type().InternalType()) {
+		case PhysicalType::INT16:
+			hugeint_val = Hugeint::Convert(value.GetValueUnsafe<int16_t>());
+			break;
+		case PhysicalType::INT32:
+			hugeint_val = Hugeint::Convert(value.GetValueUnsafe<int32_t>());
+			break;
+		case PhysicalType::INT64:
+			hugeint_val = Hugeint::Convert(value.GetValueUnsafe<int64_t>());
+			break;
+		case PhysicalType::INT128:
+			hugeint_val = value.GetValueUnsafe<hugeint_t>();
+			break;
+		default:
+			return std::nullopt;
+		}
+		paimon::Decimal::int128_t raw = (static_cast<paimon::Decimal::int128_t>(hugeint_val.upper) << 64) |
+		                                static_cast<paimon::Decimal::uint128_t>(hugeint_val.lower);
+		return paimon::Literal(paimon::Decimal(width, scale, raw));
+	}
 	default:
 		return std::nullopt;
 	}
