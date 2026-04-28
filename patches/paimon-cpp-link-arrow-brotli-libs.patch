@@ -1,8 +1,8 @@
 diff --git a/cmake_modules/ThirdpartyToolchain.cmake b/cmake_modules/ThirdpartyToolchain.cmake
-index 09f7fb0..9c568ee 100644
+index 9e3c47d..0d2696a 100644
 --- a/cmake_modules/ThirdpartyToolchain.cmake
 +++ b/cmake_modules/ThirdpartyToolchain.cmake
-@@ -1107,6 +1107,17 @@ macro(build_arrow)
+@@ -1155,6 +1155,17 @@ macro(build_arrow)
      set(PARQUET_STATIC_LIB
          "${ARROW_PREFIX}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}parquet${CMAKE_STATIC_LIBRARY_SUFFIX}"
      )
@@ -20,7 +20,7 @@ index 09f7fb0..9c568ee 100644
  
      set(ARROW_CMAKE_ARGS
          ${EP_COMMON_CMAKE_ARGS}
-@@ -1137,6 +1148,7 @@ macro(build_arrow)
+@@ -1185,6 +1196,7 @@ macro(build_arrow)
          -DARROW_WITH_ZSTD=ON
          -DARROW_WITH_BZ2=OFF
          -DARROW_WITH_BROTLI=ON
@@ -28,17 +28,17 @@ index 09f7fb0..9c568ee 100644
          -DZSTD_ROOT=${ARROW_ZSTD_ROOT}
          -DZLIB_ROOT=${ARROW_ZLIB_ROOT}
          -DSnappy_ROOT=${ARROW_SNAPPY_ROOT}
-@@ -1157,6 +1169,9 @@ macro(build_arrow)
+@@ -1207,6 +1219,9 @@ macro(build_arrow)
                                           "${PARQUET_STATIC_LIB}"
                                           "${ARROW_DATASET_STATIC_LIB}"
                                           "${ARROW_ACERO_STATIC_LIB}"
 +                                         "${ARROW_BROTLI_DEC_STATIC_LIB}"
 +                                         "${ARROW_BROTLI_ENC_STATIC_LIB}"
 +                                         "${ARROW_BROTLI_COMMON_STATIC_LIB}"
-                         DEPENDS zstd snappy lz4 zlib)
- 
-     add_library(arrow STATIC IMPORTED)
-@@ -1203,6 +1218,18 @@ macro(build_arrow)
+                         DEPENDS zstd
+                                 snappy
+                                 lz4
+@@ -1257,6 +1272,18 @@ macro(build_arrow)
      add_dependencies(arrow_dataset arrow_ep)
      add_dependencies(arrow_acero arrow_ep)
  
@@ -57,13 +57,13 @@ index 09f7fb0..9c568ee 100644
      target_link_libraries(arrow_acero INTERFACE arrow)
  
      target_link_libraries(arrow_dataset INTERFACE arrow_acero)
-@@ -1212,6 +1239,9 @@ macro(build_arrow)
+@@ -1266,6 +1293,9 @@ macro(build_arrow)
                                      snappy
                                      lz4
                                      zlib
 +                                    brotlidec
 +                                    brotlienc
 +                                    brotlicommon
+                                     re2::re2
                                      arrow_bundled_dependencies)
  
-     target_link_libraries(parquet
