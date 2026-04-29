@@ -2,7 +2,7 @@
 
 This extension enables [DuckDB](https://duckdb.org/) to read and query [Apache Paimon](https://paimon.apache.org/) format data directly — no ETL pipelines, no Flink/Spark clusters required. Just open a DuckDB shell and run SQL against your Paimon tables.
 
-Similar to other extension, duckdb-paimon brings DuckDB's powerful local analytics to the Paimon data lake ecosystem.
+Similar to other extensions, duckdb-paimon brings DuckDB's powerful local analytics to the Paimon data lake ecosystem.
 
 ## About Apache Paimon
 
@@ -11,8 +11,6 @@ Similar to other extension, duckdb-paimon brings DuckDB's powerful local analyti
 ## Implementation
 
 This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon-cpp), an open-source C++ library that provides native access to Paimon format data. It is the first library that brings native Paimon read/write capabilities to the C++ ecosystem.
-
-### Technical Highlights
 
 - **Zero JVM dependency** — No Java runtime required. Pure C++ implementation means minimal memory footprint and instant startup.
 - **Apache Arrow data exchange** — Data flows between paimon-cpp and DuckDB via Apache Arrow, the industry standard for columnar in-memory data, enabling zero-copy transfers with no serialization overhead.
@@ -24,7 +22,7 @@ This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon
 - Read Paimon table data (local and remote OSS)
 - Projection pushdown optimization
 - Predicate pushdown optimization
-- Multiple file format support (Parquet data files, ORC manifest files)
+- Multiple file format support (manifest / data)
 - Catalog ATTACH support
 - DuckDB Secret-based OSS credential management
 - Snapshot history inspection
@@ -54,30 +52,52 @@ FROM paimon_scan('oss://...', 'db', 'orders') o
 JOIN read_csv('customers.csv') c ON o.customer_id = c.id;
 ```
 
-## Getting Started
+## Development Guide
 
-Clone the repository:
+### Building
+
+Clone the repository with submodules:
 
 ```shell
 git clone --recurse-submodules https://github.com/polardb/duckdb-paimon.git
 cd duckdb-paimon
 ```
 
-Note that `--recurse-submodules` will ensure DuckDB and paimon-cpp are pulled which are required to build the extension.
+`--recurse-submodules` pulls DuckDB and paimon-cpp, which are required to build the extension.
 
-### Building
+Build in release mode:
 
 ```shell
 GEN=ninja make
 ```
 
-### Running the Extension
+Or build in debug mode:
 
-To run the extension code, simply start the shell with `./build/release/duckdb`. This shell will have the extension pre-loaded.
+```shell
+GEN=ninja make debug
+```
 
-Now we can use the features from the extension directly in DuckDB:
+### Running the Tests
 
-#### Query Local Paimon Tables
+```shell
+# Release
+make test
+
+# Debug
+make test_debug
+```
+
+## Usage
+
+The examples below use sample data bundled in the `data/` directory of this repository. Start the DuckDB shell with the extension pre-loaded:
+
+```shell
+./build/release/duckdb
+```
+
+### Query Local Paimon Tables
+
+Pass the table path directly to `paimon_scan`, or use separate warehouse / database / table arguments:
 
 ```sql
 SELECT * FROM paimon_scan('./data/testdb.db/testtbl');
@@ -95,9 +115,13 @@ SELECT * FROM paimon_scan('./data/testdb.db/testtbl');
 │ Henry   │     3 │     1 │   32.1 │
 │ Iris    │     3 │     2 │   33.2 │
 └─────────┴───────┴───────┴────────┘
+
+-- SELECT * FROM paimon_scan('./data', 'testdb', 'testtbl');
 ```
 
-#### Query Remote OSS Paimon Tables
+### Query Remote OSS Paimon Tables
+
+First create a secret to supply OSS credentials, then query using either a full table path or separate warehouse / database / table arguments:
 
 ```sql
 -- Configure OSS credentials
@@ -108,46 +132,44 @@ CREATE SECRET my_oss (
     endpoint 'oss-cn-hangzhou.aliyuncs.com'
 );
 
--- Query Paimon tables on OSS
+SELECT * FROM paimon_scan('oss://your-bucket/warehouse/your_db.db/your_table');
 SELECT * FROM paimon_scan('oss://your-bucket/warehouse', 'your_db', 'your_table');
 ```
 
-#### Attach as Catalog
+### Attach as Catalog
+
+ATTACH a Paimon warehouse as a catalog to browse and query all databases and tables inside it with standard DuckDB SQL:
 
 ```sql
-ATTACH 'oss://my-bucket/warehouse' AS paimon_lake (TYPE paimon);
+ATTACH './data' AS my_catalog (TYPE paimon);
 
 SHOW ALL TABLES;
-DESCRIBE paimon_lake.sales_db.orders;
+SELECT * FROM my_catalog.testdb.testtbl;
+
+-- For an OSS warehouse:
+-- ATTACH 'oss://my-bucket/warehouse' AS my_catalog (TYPE paimon);
 ```
 
-#### Inspect Snapshot History
+### Inspect Snapshot History
 
-Use `paimon_snapshots` to list all snapshots of a Paimon table — useful for auditing commit history, diagnosing data issues, or identifying a snapshot ID for time-travel queries.
+Use `paimon_snapshots` to list all snapshots of a Paimon table — useful for auditing commit history, diagnosing data issues, or identifying a snapshot ID for time-travel queries:
 
 ```sql
--- Using a full filesystem path
 SELECT snapshot_id, commit_kind, commit_time, total_record_count
-FROM paimon_snapshots('./warehouse/mydb.db/orders')
+FROM paimon_snapshots('./data/testdb.db/testtbl')
 ORDER BY snapshot_id;
 ┌─────────────┬─────────────┬─────────────────────────┬────────────────────┐
-│ snapshot_id │ commit_kind │       commit_time        │ total_record_count │
-│    int64    │   varchar   │        timestamp         │       int64        │
+│ snapshot_id │ commit_kind │      commit_time        │ total_record_count │
+│    int64    │   varchar   │       timestamp         │       int64        │
 ├─────────────┼─────────────┼─────────────────────────┼────────────────────┤
-│           1 │ APPEND      │ 2026-01-15 08:00:01.234  │                  3 │
-│           2 │ APPEND      │ 2026-01-15 08:00:02.456  │                  6 │
-│           3 │ COMPACT     │ 2026-01-15 08:00:10.789  │                  6 │
+│           1 │ APPEND      │ 2026-01-15 10:48:23.486 │                  3 │
+│           2 │ APPEND      │ 2026-01-15 10:48:23.509 │                  6 │
+│           3 │ APPEND      │ 2026-01-15 10:48:23.528 │                  9 │
 └─────────────┴─────────────┴─────────────────────────┴────────────────────┘
 
--- Alternatively, pass warehouse / database / table as separate arguments
-SELECT snapshot_id, commit_kind, total_record_count
-FROM paimon_snapshots('oss://my-bucket/warehouse', 'mydb', 'orders');
-```
-
-### Running the Tests
-
-```shell
-make test
+-- SELECT snapshot_id, commit_kind, commit_time, total_record_count
+-- FROM paimon_snapshots('oss://your-bucket/warehouse', 'your_db', 'your_table')
+-- ORDER BY snapshot_id;
 ```
 
 ## Related Projects
