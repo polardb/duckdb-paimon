@@ -1,0 +1,30 @@
+# name: test/sql/paimon_snapshots.test
+# group: [sql]
+
+require paimon
+
+# full-path form: verify row count
+query I
+SELECT count(*) FROM paimon_snapshots('./data/testdb.db/testtbl');
+----
+3
+
+# 3-arg form: verify key columns across all snapshots
+query IIIII
+SELECT snapshot_id, schema_id, commit_kind, total_record_count, delta_record_count
+FROM paimon_snapshots('./data', 'testdb', 'testtbl')
+ORDER BY snapshot_id;
+----
+1	0	APPEND	3	3
+2	0	APPEND	6	3
+3	0	APPEND	9	3
+
+# optional nullable column is NULL when absent
+query I
+SELECT watermark
+FROM paimon_snapshots('./data/testdb.db/testtbl')
+ORDER BY snapshot_id;
+----
+NULL
+NULL
+NULL

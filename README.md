@@ -27,6 +27,7 @@ This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon
 - Multiple file format support (Parquet data files, ORC manifest files)
 - Catalog ATTACH support
 - DuckDB Secret-based OSS credential management
+- Snapshot history inspection
 
 ## Use Cases
 
@@ -118,6 +119,29 @@ ATTACH 'oss://my-bucket/warehouse' AS paimon_lake (TYPE paimon);
 
 SHOW ALL TABLES;
 DESCRIBE paimon_lake.sales_db.orders;
+```
+
+#### Inspect Snapshot History
+
+Use `paimon_snapshots` to list all snapshots of a Paimon table — useful for auditing commit history, diagnosing data issues, or identifying a snapshot ID for time-travel queries.
+
+```sql
+-- Using a full filesystem path
+SELECT snapshot_id, commit_kind, commit_time, total_record_count
+FROM paimon_snapshots('./warehouse/mydb.db/orders')
+ORDER BY snapshot_id;
+┌─────────────┬─────────────┬─────────────────────────┬────────────────────┐
+│ snapshot_id │ commit_kind │       commit_time        │ total_record_count │
+│    int64    │   varchar   │        timestamp         │       int64        │
+├─────────────┼─────────────┼─────────────────────────┼────────────────────┤
+│           1 │ APPEND      │ 2026-01-15 08:00:01.234  │                  3 │
+│           2 │ APPEND      │ 2026-01-15 08:00:02.456  │                  6 │
+│           3 │ COMPACT     │ 2026-01-15 08:00:10.789  │                  6 │
+└─────────────┴─────────────┴─────────────────────────┴────────────────────┘
+
+-- Alternatively, pass warehouse / database / table as separate arguments
+SELECT snapshot_id, commit_kind, total_record_count
+FROM paimon_snapshots('oss://my-bucket/warehouse', 'mydb', 'orders');
 ```
 
 ### Running the Tests
