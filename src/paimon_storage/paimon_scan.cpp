@@ -50,9 +50,7 @@ namespace duckdb {
 
 struct PaimonScanBindData : public TableFunctionData {
 public:
-	string warehouse;
-	string dbname;
-	string tablename;
+	PaimonTablePath path;
 
 	map<string, string> paimon_options;
 
@@ -431,47 +429,14 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto bind_data = make_uniq<PaimonScanBindData>();
 
-	string warehouse;
-	string dbname;
-
-	if (input.inputs.empty()) {
-		throw InvalidInputException("warehouse path is necessary");
-	}
-
-	if (input.inputs.size() > 1) {
-		bind_data->warehouse = input.inputs[0].ToString();
-		bind_data->dbname = input.inputs[1].ToString();
-		bind_data->tablename = input.inputs[2].ToString();
-	} else {
-		auto whole_path = input.inputs[0].ToString();
-		auto last_slash = whole_path.find_last_of('/');
-
-		if (last_slash == string::npos) {
-			throw InvalidInputException("Invalid database path format: missing '/'");
-		}
-
-		bind_data->tablename = whole_path.substr(last_slash + 1);
-
-		whole_path = whole_path.substr(0, last_slash);
-		last_slash = whole_path.find_last_of('/');
-
-		string dbname_raw = whole_path.substr(last_slash + 1);
-		string dbsuffix(paimon::Catalog::DB_SUFFIX);
-
-		if (!StringUtil::EndsWith(dbname_raw, dbsuffix)) {
-			throw InvalidInputException("Invalid database path format");
-		}
-
-		bind_data->dbname = dbname_raw.substr(0, dbname_raw.size() - dbsuffix.size());
-		bind_data->warehouse = whole_path.substr(0, last_slash);
-	}
+	auto path = PaimonTablePath::Parse(input.inputs);
+	bind_data->path = path;
 
 	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
-	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, bind_data->warehouse, scan_options);
-	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, bind_data->warehouse, scan_options);
+	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
+	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, path.warehouse, scan_options);
 
-	auto table_schema_result =
-	    paimon_catalog->LoadTableSchema(paimon::Identifier(bind_data->dbname, bind_data->tablename));
+	auto table_schema_result = paimon_catalog->LoadTableSchema(paimon::Identifier(path.dbname, path.tablename));
 	if (!table_schema_result.ok()) {
 		throw IOException(table_schema_result.status().ToString());
 	}
@@ -645,7 +610,7 @@ static unique_ptr<GlobalTableFunctionState> PaimonScanInitGlobal(ClientContext &
 		state->paimon_predicates = pred_res.value();
 	}
 
-	auto path = bind.warehouse + "/" + bind.dbname + paimon::Catalog::DB_SUFFIX + "/" + bind.tablename;
+	auto path = bind.path.warehouse + "/" + bind.path.dbname + paimon::Catalog::DB_SUFFIX + "/" + bind.path.tablename;
 
 	// construct the scanner
 	paimon::ScanContextBuilder scan_context_builder(path);

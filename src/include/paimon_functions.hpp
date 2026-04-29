@@ -28,12 +28,21 @@
 
 namespace duckdb {
 
+struct PaimonTablePath {
+	string warehouse;
+	string dbname;
+	string tablename;
+
+	static PaimonTablePath Parse(const vector<Value> &inputs);
+};
+
 class PaimonFunctions {
 public:
 	static vector<TableFunctionSet> GetTableFunctions();
 
 private:
 	static TableFunctionSet GetPaimonScanFunction();
+	static TableFunctionSet GetPaimonSnapshotsFunction();
 };
 
 } // namespace duckdb
