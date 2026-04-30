@@ -694,16 +694,16 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 
 	auto fun = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, PaimonScan,
 	                         PaimonScanBind, PaimonScanInitGlobal);
-	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR;
-	fun.named_parameters["file_format"] = LogicalType::VARCHAR;
+	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
+	fun.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated: auto-detected from table schema
 	fun.init_local = PaimonScanInitLocal;
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
 	function_set.AddFunction(fun);
 
 	auto fun_fullpath = TableFunction({LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
-	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR;
-	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;
+	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
+	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated
 	fun_fullpath.init_local = PaimonScanInitLocal;
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;

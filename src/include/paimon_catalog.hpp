@@ -47,9 +47,9 @@ public:
 	                                                               AttachedDatabase &db, Catalog &catalog);
 
 	static map<string, string> GetPaimonOptions(ClientContext &context, const string &path,
-	                                            const unordered_map<string, Value> &attached_options);
+	                                            const unordered_map<string, Value> &input_options);
 	static unique_ptr<paimon::Catalog> CreatePaimonCatalog(ClientContext &context, const string &path,
-	                                                       const unordered_map<string, Value> &attached_options);
+	                                                       const unordered_map<string, Value> &input_options);
 
 	// catalog APIs
 	void Initialize(bool load_builtin) override;

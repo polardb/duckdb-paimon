@@ -15,7 +15,7 @@ statement ok
 DETACH paimon_default;
 
 statement ok
-ATTACH './data' AS paimon_lake (TYPE paimon, manifest_format 'avro');
+ATTACH './data' AS paimon_lake (TYPE paimon);
 
 query I
 SELECT count(*) FROM paimon_lake.avro_manifest.testtbl;
