@@ -26,6 +26,7 @@ This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon
 - Catalog ATTACH support
 - DuckDB Secret-based OSS credential management
 - Snapshot history inspection
+- Snapshot-based time travel queries
 
 ## Use Cases
 
@@ -170,6 +171,30 @@ ORDER BY snapshot_id;
 -- SELECT snapshot_id, commit_kind, commit_time, total_record_count
 -- FROM paimon_snapshots('oss://your-bucket/warehouse', 'your_db', 'your_table')
 -- ORDER BY snapshot_id;
+```
+
+### Time Travel Queries
+
+Query a historical version of a table by snapshot ID or by timestamp. Use `paimon_snapshots` first to identify the snapshot you want.
+
+```sql
+-- Read from a specific snapshot (6 rows — state after the second append)
+SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=2);
+
+-- Read from a point in time (returns the snapshot active at that moment)
+SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_timestamp=TIMESTAMP '2026-01-15 10:48:23.5');
+```
+
+When using an ATTACHed catalog, the same functionality is available via DuckDB's native `AT` clause:
+
+```sql
+ATTACH './data' AS my_catalog (TYPE paimon);
+
+-- AT (VERSION => snapshot_id)
+SELECT count(*) FROM my_catalog.testdb.testtbl AT (VERSION => 2);
+
+-- AT (TIMESTAMP => point_in_time)
+SELECT count(*) FROM my_catalog.testdb.testtbl AT (TIMESTAMP => TIMESTAMP '2026-01-15 10:48:23.5');
 ```
 
 ## Related Projects

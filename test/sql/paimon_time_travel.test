@@ -1,0 +1,91 @@
+# name: test/sql/paimon_time_travel.test
+# group: [sql]
+
+require paimon
+
+# snapshot 1: first batch only (3 rows)
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=1);
+----
+3
+
+# snapshot 2: first two batches (6 rows)
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=2);
+----
+6
+
+# snapshot 3: all batches (9 rows), same as latest
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=3);
+----
+9
+
+# verify data content at snapshot 1
+query IIII
+SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=1);
+----
+Alice	1	0	11.0
+Bob	1	1	12.1
+Cathy	1	2	13.2
+
+# 3-arg form with snapshot_from_id
+query I
+SELECT count(*) FROM paimon_scan('./data', 'testdb', 'testtbl', snapshot_from_id=1);
+----
+3
+
+# snapshot_from_timestamp with far-future timestamp returns latest snapshot
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_timestamp=TIMESTAMP '2099-01-01');
+----
+9
+
+# error: cannot use both snapshot_from_id and snapshot_from_timestamp
+statement error
+SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=1, snapshot_from_timestamp=TIMESTAMP '2099-01-01');
+----
+Cannot specify both 'snapshot_from_id' and 'snapshot_from_timestamp'
+
+# AT (VERSION => N) via ATTACHed catalog
+statement ok
+ATTACH './data' AS cat (TYPE paimon);
+
+query I
+SELECT count(*) FROM cat.testdb.testtbl AT (VERSION => 1);
+----
+3
+
+query I
+SELECT count(*) FROM cat.testdb.testtbl AT (VERSION => 2);
+----
+6
+
+query I
+SELECT count(*) FROM cat.testdb.testtbl AT (VERSION => 3);
+----
+9
+
+# AT (TIMESTAMP => before snapshot 2) returns snapshot 1
+query I
+SELECT count(*) FROM cat.testdb.testtbl AT (TIMESTAMP => TIMESTAMP '2026-01-15 10:48:23.5');
+----
+3
+
+# AT (TIMESTAMP => between snapshot 2 and 3) returns snapshot 2
+query I
+SELECT count(*) FROM cat.testdb.testtbl AT (TIMESTAMP => TIMESTAMP '2026-01-15 10:48:23.52');
+----
+6
+
+# AT (TIMESTAMP => exactly snapshot 3) returns snapshot 3
+query I
+SELECT count(*) FROM cat.testdb.testtbl AT (TIMESTAMP => TIMESTAMP '2026-01-15 10:48:23.528');
+----
+9
+
+# error: invalid AT unit rejected by parser
+statement error
+SELECT * FROM cat.testdb.testtbl AT (SYSTEM_TIME => TIMESTAMP '2099-01-01');
+----
+syntax error
