@@ -25,9 +25,11 @@
 #include "paimon_table_entry.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/tableref/bound_at_clause.hpp"
 
 #include "paimon_catalog.hpp"
 
@@ -42,6 +44,12 @@ unique_ptr<BaseStatistics> PaimonTableEntry::GetStatistics(ClientContext &contex
 }
 
 TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, name);
+	return GetScanFunction(context, bind_data, lookup);
+}
+
+TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
+                                                const EntryLookupInfo &lookup_info) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto transaction = CatalogTransaction::GetSystemTransaction(db);
@@ -62,6 +70,20 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 	for (const auto &entry : paimon_catalog.GetAttachOptions()) {
 		param_map[entry.first] = entry.second;
 	}
+
+	auto at_clause = lookup_info.GetAtClause();
+	if (at_clause) {
+		auto unit = StringUtil::Upper(at_clause->Unit());
+		if (unit == "VERSION") {
+			param_map["snapshot_from_id"] = at_clause->GetValue().CastAs(context, LogicalType::BIGINT);
+		} else if (unit == "TIMESTAMP") {
+			param_map["snapshot_from_timestamp"] = at_clause->GetValue().CastAs(context, LogicalType::TIMESTAMP);
+		} else {
+			throw InvalidInputException("Unsupported AT unit \"%s\" for Paimon. Use VERSION or TIMESTAMP.",
+			                            at_clause->Unit());
+		}
+	}
+
 	vector<LogicalType> return_types;
 	vector<string> names;
 	TableFunctionRef empty_ref;

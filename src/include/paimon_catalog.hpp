@@ -70,8 +70,15 @@ public:
 	                             PhysicalOperator &plan) override;
 
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
-	bool InMemory() override;
-	string GetDBPath() override;
+	bool SupportsTimeTravel() const override {
+		return true;
+	}
+	bool InMemory() override {
+		return false;
+	}
+	string GetDBPath() override {
+		return path;
+	}
 
 	PaimonSchemaSet &GetSchemas() {
 		return schemas;
