@@ -25,6 +25,8 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/entry_lookup_info.hpp"
+#include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 
 namespace duckdb {
@@ -35,6 +37,8 @@ public:
 
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
+	                              const EntryLookupInfo &lookup_info) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
 	virtual_column_map_t GetVirtualColumns() const override;
 	vector<column_t> GetRowIdColumns() const override;
