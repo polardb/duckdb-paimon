@@ -23,18 +23,18 @@ require paimon
 
 # equality
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal = 100.50;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal = 100.50;
 ----
 Alice	100.50
 
 # equality with no match
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal = 777.77;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal = 777.77;
 ----
 
 # not equal
 query I
-SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal != 999.99 ORDER BY col_string;
+SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal != 999.99 ORDER BY col_string;
 ----
 Alice
 Bob
@@ -47,7 +47,7 @@ Iris
 
 # greater than
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal > 200.00 ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal > 200.00 ORDER BY col_string;
 ----
 Bob	200.75
 Cathy	350.00
@@ -56,7 +56,7 @@ Henry	500.00
 
 # less than
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal < 100.00 ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal < 100.00 ORDER BY col_string;
 ----
 David	50.25
 Grace	0.01
@@ -64,14 +64,14 @@ Iris	75.80
 
 # greater than or equal
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal >= 500.00 ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal >= 500.00 ORDER BY col_string;
 ----
 Eve	999.99
 Henry	500.00
 
 # less than or equal
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal <= 100.50 ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal <= 100.50 ORDER BY col_string;
 ----
 Alice	100.50
 David	50.25
@@ -80,7 +80,7 @@ Iris	75.80
 
 # BETWEEN
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal BETWEEN 50.25 AND 200.75 ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal BETWEEN 50.25 AND 200.75 ORDER BY col_string;
 ----
 Alice	100.50
 Bob	200.75
@@ -90,7 +90,7 @@ Iris	75.80
 
 # IN list
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal IN (100.50, 999.99, 0.01) ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal IN (100.50, 999.99, 0.01) ORDER BY col_string;
 ----
 Alice	100.50
 Eve	999.99
@@ -98,7 +98,7 @@ Grace	0.01
 
 # NOT IN
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal NOT IN (100.50, 200.75, 350.00, 50.25, 999.99, 123.45) ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal NOT IN (100.50, 200.75, 350.00, 50.25, 999.99, 123.45) ORDER BY col_string;
 ----
 Grace	0.01
 Henry	500.00
@@ -106,13 +106,13 @@ Iris	75.80
 
 # IS NULL (row 10 has NULL decimal)
 query I
-SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal IS NULL;
+SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal IS NULL;
 ----
 NULL
 
 # IS NOT NULL (rows 1-9 have non-NULL decimals)
 query I
-SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal IS NOT NULL ORDER BY col_string;
+SELECT col_string FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal IS NOT NULL ORDER BY col_string;
 ----
 Alice
 Bob
@@ -126,14 +126,14 @@ Iris
 
 # constant on left side (flipped comparison)
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE 500.00 <= col_decimal ORDER BY col_string;
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE 500.00 <= col_decimal ORDER BY col_string;
 ----
 Eve	999.99
 Henry	500.00
 
 # combined: decimal AND integer
 query III
-SELECT col_string, col_decimal, col_int FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal > 100.00 AND col_int > 0 ORDER BY col_string;
+SELECT col_string, col_decimal, col_int FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal > 100.00 AND col_int > 0 ORDER BY col_string;
 ----
 Alice	100.50	1000
 Bob	200.75	2000
@@ -143,14 +143,14 @@ Henry	500.00	54321
 
 # combined: decimal AND timestamp
 query III
-SELECT col_string, col_decimal, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal >= 100.00 AND col_timestamp < TIMESTAMP '2025-06-01 00:00:00' ORDER BY col_string;
+SELECT col_string, col_decimal, col_timestamp FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal >= 100.00 AND col_timestamp < TIMESTAMP '2025-06-01 00:00:00' ORDER BY col_string;
 ----
 Alice	100.50	2025-01-15 10:30:00
 Bob	200.75	2025-03-20 14:15:30
 
 # combined: decimal OR string
 query II
-SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl', manifest_format='orc') WHERE col_decimal = 999.99 OR col_string = 'Grace';
+SELECT col_string, col_decimal FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_decimal = 999.99 OR col_string = 'Grace';
 ----
 Eve	999.99
 Grace	0.01
