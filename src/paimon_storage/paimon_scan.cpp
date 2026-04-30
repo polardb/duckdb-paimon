@@ -57,6 +57,8 @@ public:
 	ArrowTableSchema arrow_table;
 
 	std::shared_ptr<paimon::Predicate> predicates = nullptr;
+
+	string table_schema_json;
 };
 
 static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundComparisonExpression &comp, LogicalGet &get) {
@@ -442,6 +444,12 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	}
 	auto table_schema = std::move(table_schema_result).value();
 
+	auto json_schema_result = table_schema->GetJsonSchema();
+	if (!json_schema_result.ok()) {
+		throw IOException(json_schema_result.status().ToString());
+	}
+	bind_data->table_schema_json = std::move(json_schema_result).value();
+
 	auto arrow_schema_result = table_schema->GetArrowSchema();
 	if (!arrow_schema_result.ok()) {
 		throw IOException(arrow_schema_result.status().ToString());
@@ -557,6 +565,7 @@ private:
 
 		paimon::ReadContextBuilder read_context_builder(global_state.path);
 		auto read_context_result = read_context_builder.SetOptions(bind_data.paimon_options)
+		                               .SetTableSchema(bind_data.table_schema_json)
 		                               .SetReadFieldIds(read_column_ids)
 		                               .SetPredicate(global_state.paimon_predicates)
 		                               .EnablePredicateFilter(false)
