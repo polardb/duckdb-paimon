@@ -696,6 +696,8 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	                         PaimonScanBind, PaimonScanInitGlobal);
 	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
 	fun.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated: auto-detected from table schema
+	fun.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
+	fun.named_parameters["snapshot_from_timestamp"] = LogicalType::TIMESTAMP;
 	fun.init_local = PaimonScanInitLocal;
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
@@ -704,6 +706,8 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	auto fun_fullpath = TableFunction({LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
 	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
 	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated
+	fun_fullpath.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
+	fun_fullpath.named_parameters["snapshot_from_timestamp"] = LogicalType::TIMESTAMP;
 	fun_fullpath.init_local = PaimonScanInitLocal;
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;

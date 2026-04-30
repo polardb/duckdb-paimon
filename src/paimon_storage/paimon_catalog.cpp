@@ -24,6 +24,7 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -40,9 +41,9 @@
 
 namespace duckdb {
 
-static std::optional<string> TryGetPaimonOptionValue(const unordered_map<string, Value> &attached_options,
+static std::optional<string> TryGetPaimonOptionValue(const unordered_map<string, Value> &input_options,
                                                      const string &key) {
-	for (const auto &entry : attached_options) {
+	for (const auto &entry : input_options) {
 		if (StringUtil::CIEquals(entry.first, key)) {
 			return entry.second.ToString();
 		}
@@ -50,9 +51,9 @@ static std::optional<string> TryGetPaimonOptionValue(const unordered_map<string,
 	return {};
 }
 
-static string GetValidatedFormatOption(const unordered_map<string, Value> &attached_options, const string &key,
+static string GetValidatedFormatOption(const unordered_map<string, Value> &input_options, const string &key,
                                        const string &default_value, const vector<string> &supported_values) {
-	auto raw_value = TryGetPaimonOptionValue(attached_options, key);
+	auto raw_value = TryGetPaimonOptionValue(input_options, key);
 	if (!raw_value.has_value()) {
 		return default_value;
 	}
@@ -127,6 +128,20 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 	}
 
 	paimon_options.insert({paimon::Options::READ_BATCH_SIZE, std::to_string(STANDARD_VECTOR_SIZE)});
+
+	auto snap_id = TryGetPaimonOptionValue(input_options, "snapshot_from_id");
+	auto snap_ts = TryGetPaimonOptionValue(input_options, "snapshot_from_timestamp");
+	if (snap_id.has_value() && snap_ts.has_value()) {
+		throw InvalidInputException("Cannot specify both 'snapshot_from_id' and 'snapshot_from_timestamp'");
+	}
+	if (snap_id.has_value()) {
+		paimon_options[paimon::Options::SCAN_SNAPSHOT_ID] = snap_id.value();
+	}
+	if (snap_ts.has_value()) {
+		auto ts = Timestamp::FromString(snap_ts.value(), false);
+		auto epoch_ms = Timestamp::GetEpochMs(ts);
+		paimon_options[paimon::Options::SCAN_TIMESTAMP_MILLIS] = std::to_string(epoch_ms);
+	}
 
 	return paimon_options;
 }
@@ -215,14 +230,6 @@ PhysicalOperator &PaimonCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerat
 
 DatabaseSize PaimonCatalog::GetDatabaseSize(ClientContext &) {
 	throw NotImplementedException("GetDatabaseSize not supported yet");
-}
-
-bool PaimonCatalog::InMemory() {
-	return false;
-}
-
-string PaimonCatalog::GetDBPath() {
-	return path;
 }
 
 void PaimonCatalog::DropSchema(ClientContext &, DropInfo &) {
