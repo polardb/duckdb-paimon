@@ -4,7 +4,7 @@
 require paimon
 
 query IIII
-SELECT * FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc');
+SELECT * FROM paimon_scan('./data/testdb.db/testtbl');
 ----
 Alice	1	0	11.0
 Bob	1	1	12.1
@@ -23,7 +23,7 @@ SELECT count(*) FROM paimon_scan('./data/avro_manifest.db/testtbl');
 
 # projection pushdown
 query I
-SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc');
+SELECT f0 FROM paimon_scan('./data/testdb.db/testtbl');
 ----
 Alice
 Bob
@@ -37,7 +37,7 @@ Iris
 
 # projection pushdown
 query II
-SELECT f3, f0 FROM paimon_scan('./data/testdb.db/testtbl', manifest_format='orc');
+SELECT f3, f0 FROM paimon_scan('./data/testdb.db/testtbl');
 ----
 11.0	Alice
 12.1	Bob

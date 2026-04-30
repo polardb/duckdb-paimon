@@ -71,16 +71,26 @@ static string GetValidatedFormatOption(const unordered_map<string, Value> &attac
 }
 
 map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, const string &path,
-                                                    const unordered_map<string, Value> &attached_options) {
-	// default options
+                                                    const unordered_map<string, Value> &input_options) {
+	// Format options are only injected when the user explicitly provides them.
+	// Otherwise paimon-cpp resolves the format from the table schema's own
+	// options (with defaults: manifest.format=avro, file.format=parquet).
 	static const vector<string> supported_manifest_formats = {"avro", "orc", "parquet"};
 	static const vector<string> supported_file_formats = {"avro", "blob", "orc", "parquet"};
 
-	map<string, string> paimon_options = {
-	    {paimon::Options::MANIFEST_FORMAT,
-	     GetValidatedFormatOption(attached_options, "manifest_format", "avro", supported_manifest_formats)},
-	    {paimon::Options::FILE_FORMAT,
-	     GetValidatedFormatOption(attached_options, "file_format", "parquet", supported_file_formats)}};
+	map<string, string> paimon_options;
+
+	auto manifest_fmt = TryGetPaimonOptionValue(input_options, "manifest_format");
+	if (manifest_fmt.has_value()) {
+		paimon_options[paimon::Options::MANIFEST_FORMAT] =
+		    GetValidatedFormatOption(input_options, "manifest_format", "", supported_manifest_formats);
+	}
+
+	auto file_fmt = TryGetPaimonOptionValue(input_options, "file_format");
+	if (file_fmt.has_value()) {
+		paimon_options[paimon::Options::FILE_FORMAT] =
+		    GetValidatedFormatOption(input_options, "file_format", "", supported_file_formats);
+	}
 
 	// secret loading
 	auto &secret_manager = SecretManager::Get(context);
@@ -122,8 +132,8 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 }
 
 unique_ptr<paimon::Catalog> PaimonCatalog::CreatePaimonCatalog(ClientContext &context, const string &path,
-                                                               const unordered_map<string, Value> &attached_options) {
-	auto paimon_options = PaimonCatalog::GetPaimonOptions(context, path, attached_options);
+                                                               const unordered_map<string, Value> &input_options) {
+	auto paimon_options = PaimonCatalog::GetPaimonOptions(context, path, input_options);
 
 	auto result = paimon::Catalog::Create(path, paimon_options);
 	if (!result.ok()) {
