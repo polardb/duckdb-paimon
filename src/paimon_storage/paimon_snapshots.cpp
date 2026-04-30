@@ -113,12 +113,12 @@ TableFunctionSet PaimonFunctions::GetPaimonSnapshotsFunction() {
 
 	auto fun = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, PaimonSnapshotsExecute,
 	                         PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
-	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR;
+	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
 	function_set.AddFunction(fun);
 
 	auto fun_fullpath =
 	    TableFunction({LogicalType::VARCHAR}, PaimonSnapshotsExecute, PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
-	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR;
+	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
 	function_set.AddFunction(fun_fullpath);
 
 	return function_set;
