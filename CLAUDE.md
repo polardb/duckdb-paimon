@@ -21,9 +21,10 @@ make test # run tests (release)
 - Apache License 2.0 header required on all new source files
 - Code style is inherited from DuckDB (`.clang-format` delegates to `duckdb/.clang-format`). Run `make format-fix` to auto-format before committing
 
-## Git commit
+## Branches
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/). Include a title and body separated by a blank line. Wrap all lines at 72 characters, breaking at word boundaries. Use `Co-authored-by` (not `Co-Authored-By`).
+- `main` — targets DuckDB 1.5
+- `v1.4-andium` — targets DuckDB 1.4
 
 ## paimon-cpp submodule
 
