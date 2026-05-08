@@ -167,7 +167,9 @@ PaimonCatalog::PaimonCatalog(ClientContext &context, AttachedDatabase &db, const
 unique_ptr<Catalog> PaimonCatalog::Attach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                           AttachedDatabase &db, const string &name, AttachInfo &info,
                                           AttachOptions &options) {
-	db.SetReadOnlyDatabase();
+	if (options.access_mode == AccessMode::READ_ONLY) {
+		db.SetReadOnlyDatabase();
+	}
 	return make_uniq<PaimonCatalog>(context, db, info.path, info.options, options.access_mode);
 }
 
@@ -183,8 +185,16 @@ string PaimonCatalog::GetCatalogType() {
 	return "paimon";
 }
 
-optional_ptr<CatalogEntry> PaimonCatalog::CreateSchema(CatalogTransaction, CreateSchemaInfo &) {
-	throw NotImplementedException("CreateSchema not supported yet");
+optional_ptr<CatalogEntry> PaimonCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	bool ignore_if_exists = info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT;
+	auto status = paimon_catalog->CreateDatabase(info.schema, {}, ignore_if_exists);
+	if (!status.ok()) {
+		if (status.IsExist() || status.IsNotExist()) {
+			throw CatalogException(status.ToString());
+		}
+		throw IOException(status.ToString());
+	}
+	return schemas.CreateEntry(info.schema);
 }
 
 optional_ptr<SchemaCatalogEntry> PaimonCatalog::LookupSchema(CatalogTransaction transaction,
@@ -232,8 +242,16 @@ DatabaseSize PaimonCatalog::GetDatabaseSize(ClientContext &) {
 	throw NotImplementedException("GetDatabaseSize not supported yet");
 }
 
-void PaimonCatalog::DropSchema(ClientContext &, DropInfo &) {
-	throw NotImplementedException("DropSchema not supported yet");
+void PaimonCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	bool ignore_if_not_exists = info.if_not_found == OnEntryNotFound::RETURN_NULL;
+	auto status = paimon_catalog->DropDatabase(info.name, ignore_if_not_exists, info.cascade);
+	if (!status.ok()) {
+		if (status.IsExist() || status.IsNotExist()) {
+			throw CatalogException(status.ToString());
+		}
+		throw IOException(status.ToString());
+	}
+	schemas.DropEntry(info.name);
 }
 
 } // namespace duckdb

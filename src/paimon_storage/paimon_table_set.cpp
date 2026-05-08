@@ -49,7 +49,11 @@ optional_ptr<CatalogEntry> PaimonTableSet::BuildEntry(ClientContext &context, co
 
 	auto table_schema_result = paimon_catalog.LoadTableSchema(paimon::Identifier(schema.name, table_name));
 	if (!table_schema_result.ok()) {
-		throw IOException(table_schema_result.status().ToString());
+		if (table_schema_result.status().IsNotExist()) {
+			return nullptr;
+		} else {
+			throw IOException(table_schema_result.status().ToString());
+		}
 	}
 	auto table_schema = std::move(table_schema_result).value();
 
@@ -122,6 +126,25 @@ void PaimonTableSet::Scan(ClientContext &context, const std::function<void(Catal
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}
+}
+
+optional_ptr<CatalogEntry> PaimonTableSet::CreateEntry(CreateTableInfo &info) {
+	lock_guard<mutex> l(entry_lock);
+	auto &catalog = schema.ParentCatalog().Cast<PaimonCatalog>();
+	auto table_entry = make_uniq<PaimonTableEntry>(catalog, schema, info);
+	auto result = entries.emplace(make_pair(info.table, std::move(table_entry)));
+	return result.first->second.get();
+}
+
+optional_ptr<CatalogEntry> PaimonTableSet::RefreshEntry(ClientContext &context, const string &table_name) {
+	lock_guard<mutex> l(entry_lock);
+	entries.erase(table_name);
+	return BuildEntry(context, table_name);
+}
+
+void PaimonTableSet::DropEntry(const string &table_name) {
+	lock_guard<mutex> l(entry_lock);
+	entries.erase(table_name);
 }
 
 } // namespace duckdb
