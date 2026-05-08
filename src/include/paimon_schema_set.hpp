@@ -36,6 +36,8 @@ public:
 public:
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
+	optional_ptr<CatalogEntry> CreateEntry(const string &name);
+	void DropEntry(const string &name);
 
 private:
 	Catalog &catalog;
