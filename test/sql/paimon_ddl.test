@@ -21,6 +21,12 @@ statement ok
 DROP TABLE IF EXISTS pm.__test_ddl.t4;
 
 statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.t_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.t_with_opts;
+
+statement ok
 DROP SCHEMA IF EXISTS pm.__test_ddl CASCADE;
 
 # --- CREATE / DROP SCHEMA ---
@@ -81,6 +87,29 @@ CREATE TABLE pm.__test_ddl.t1 (id INTEGER, name VARCHAR);
 ----
 already exist
 
+# --- CREATE TABLE with PARTITIONED BY ---
+
+statement ok
+CREATE TABLE pm.__test_ddl.t_partitioned (id INTEGER, dt VARCHAR, name VARCHAR, PRIMARY KEY (id, dt)) PARTITIONED BY (dt);
+
+query IIIIII
+DESCRIBE pm.__test_ddl.t_partitioned;
+----
+id	INTEGER	YES	NULL	NULL	NULL
+dt	VARCHAR	YES	NULL	NULL	NULL
+name	VARCHAR	YES	NULL	NULL	NULL
+
+# --- CREATE TABLE with OPTIONS ---
+
+statement ok
+CREATE TABLE pm.__test_ddl.t_with_opts (id INTEGER, name VARCHAR) WITH ('bucket' = '4', 'bucket-key' = 'id');
+
+query IIIIII
+DESCRIBE pm.__test_ddl.t_with_opts;
+----
+id	INTEGER	YES	NULL	NULL	NULL
+name	VARCHAR	YES	NULL	NULL	NULL
+
 # --- DROP TABLE ---
 
 statement ok
@@ -91,6 +120,12 @@ DROP TABLE pm.__test_ddl.t2;
 
 statement ok
 DROP TABLE pm.__test_ddl.t3;
+
+statement ok
+DROP TABLE pm.__test_ddl.t_partitioned;
+
+statement ok
+DROP TABLE pm.__test_ddl.t_with_opts;
 
 # --- DROP TABLE IF EXISTS (no-op) ---
 

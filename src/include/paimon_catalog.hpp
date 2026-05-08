@@ -69,6 +69,7 @@ public:
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
 	                             PhysicalOperator &plan) override;
 
+	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
 	bool SupportsTimeTravel() const override {
 		return true;

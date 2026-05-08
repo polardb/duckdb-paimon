@@ -25,6 +25,8 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/function/table/arrow.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
@@ -127,8 +129,33 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 		}
 	}
 
+	vector<string> partition_keys;
+	for (auto &pk_expr : base.partition_keys) {
+		if (pk_expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
+			partition_keys.push_back(pk_expr->Cast<ColumnRefExpression>().GetColumnName());
+		} else {
+			throw InvalidInputException("Paimon partition key must be a column reference");
+		}
+	}
+
+	std::map<string, string> paimon_options;
+	for (auto &opt : base.options) {
+		auto &expr = *opt.second;
+		if (expr.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+			auto &val = expr.Cast<ConstantExpression>().value;
+			if (!val.IsNull()) {
+				paimon_options[opt.first] = val.ToString();
+			}
+		} else if (expr.GetExpressionType() == ExpressionType::COLUMN_REF) {
+			paimon_options[opt.first] = expr.Cast<ColumnRefExpression>().GetColumnName();
+		} else {
+			throw InvalidInputException("Paimon table option '%s' must be a literal value", opt.first);
+		}
+	}
+
 	bool ignore_if_exists = base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT;
-	auto status = paimon_catalog.CreateTable(identifier, &arrow_schema, {}, primary_keys, {}, ignore_if_exists);
+	auto status = paimon_catalog.CreateTable(identifier, &arrow_schema, partition_keys, primary_keys, paimon_options,
+	                                         ignore_if_exists);
 
 	if (!status.ok()) {
 		if (status.IsExist() || status.IsNotExist()) {

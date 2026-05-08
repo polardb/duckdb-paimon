@@ -29,6 +29,8 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
 #include "paimon_catalog.hpp"
 #include "paimon_schema_entry.hpp"
@@ -240,6 +242,15 @@ PhysicalOperator &PaimonCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerat
 
 DatabaseSize PaimonCatalog::GetDatabaseSize(ClientContext &) {
 	throw NotImplementedException("GetDatabaseSize not supported yet");
+}
+
+ErrorData PaimonCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
+	auto &base = info.Base();
+	if (!base.sort_keys.empty()) {
+		return ErrorData(ExceptionType::CATALOG,
+		                 StringUtil::Format("SORTED BY is not supported for tables in a %s catalog", GetCatalogType()));
+	}
+	return ErrorData();
 }
 
 void PaimonCatalog::DropSchema(ClientContext &context, DropInfo &info) {
