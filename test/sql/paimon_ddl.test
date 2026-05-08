@@ -1,0 +1,122 @@
+# name: test/sql/paimon_ddl.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+# --- cleanup from prior runs ---
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.t1;
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.t2;
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.t3;
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.t4;
+
+statement ok
+DROP SCHEMA IF EXISTS pm.__test_ddl CASCADE;
+
+# --- CREATE / DROP SCHEMA ---
+
+statement ok
+CREATE SCHEMA pm.__test_ddl;
+
+# duplicate schema without IF NOT EXISTS should error
+statement error
+CREATE SCHEMA pm.__test_ddl;
+----
+already exist
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS pm.__test_ddl;
+
+# --- basic CREATE TABLE ---
+
+statement ok
+CREATE TABLE pm.__test_ddl.t1 (id INTEGER, name VARCHAR);
+
+query IIIIII
+DESCRIBE pm.__test_ddl.t1;
+----
+id	INTEGER	YES	NULL	NULL	NULL
+name	VARCHAR	YES	NULL	NULL	NULL
+
+# --- CREATE TABLE with PRIMARY KEY ---
+
+statement ok
+CREATE TABLE pm.__test_ddl.t2 (id INTEGER PRIMARY KEY, name VARCHAR);
+
+query IIIIII
+DESCRIBE pm.__test_ddl.t2;
+----
+id	INTEGER	YES	NULL	NULL	NULL
+name	VARCHAR	YES	NULL	NULL	NULL
+
+# --- CREATE TABLE IF NOT EXISTS (idempotent) ---
+
+statement ok
+CREATE TABLE pm.__test_ddl.t3 (v INTEGER);
+
+statement ok
+CREATE TABLE IF NOT EXISTS pm.__test_ddl.t3 (v INTEGER);
+
+# --- error: CREATE OR REPLACE not supported ---
+
+statement error
+CREATE OR REPLACE TABLE pm.__test_ddl.t4 (v INTEGER);
+----
+CREATE OR REPLACE TABLE is not supported
+
+# --- error: duplicate CREATE TABLE ---
+
+statement error
+CREATE TABLE pm.__test_ddl.t1 (id INTEGER, name VARCHAR);
+----
+already exist
+
+# --- DROP TABLE ---
+
+statement ok
+DROP TABLE pm.__test_ddl.t1;
+
+statement ok
+DROP TABLE pm.__test_ddl.t2;
+
+statement ok
+DROP TABLE pm.__test_ddl.t3;
+
+# --- DROP TABLE IF EXISTS (no-op) ---
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_ddl.nonexistent;
+
+# --- error: DROP TABLE on non-existent table ---
+
+statement error
+DROP TABLE pm.__test_ddl.nonexistent;
+----
+does not exist
+
+# --- cleanup: DROP SCHEMA ---
+
+statement ok
+DROP SCHEMA pm.__test_ddl;
+
+# duplicate drop without IF EXISTS should error
+statement error
+DROP SCHEMA pm.__test_ddl;
+----
+not exist
+
+statement ok
+DROP SCHEMA IF EXISTS pm.__test_ddl;
+
+statement ok
+DETACH pm;
