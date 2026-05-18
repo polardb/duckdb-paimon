@@ -1,0 +1,105 @@
+# name: test/sql/paimon_write.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+# --- cleanup from prior runs ---
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_write.t_ctas_small;
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_write.t_ctas_large;
+
+statement ok
+DROP SCHEMA IF EXISTS pm.__test_write CASCADE;
+
+# --- setup ---
+
+statement ok
+CREATE SCHEMA pm.__test_write;
+
+# --- CTAS with multiple types (small) ---
+
+statement ok
+CREATE TABLE pm.__test_write.t_ctas_small AS
+    SELECT * FROM (VALUES
+        (1, 100000000000::BIGINT, 'hello', 3.14::FLOAT, 2.718281828::DOUBLE, TRUE, '2025-01-15'::DATE, '2025-01-15 10:30:00'::TIMESTAMP),
+        (2, 200000000000::BIGINT, 'world', 1.41::FLOAT, 3.141592653::DOUBLE, FALSE, '2025-06-30'::DATE, '2025-06-30 23:59:59'::TIMESTAMP),
+        (3, NULL, NULL, NULL, NULL, TRUE, NULL, NULL)
+    ) t(id, big_id, name, score_f, score_d, flag, dt, ts);
+
+query IITRRTTT
+SELECT * FROM pm.__test_write.t_ctas_small ORDER BY id;
+----
+1	100000000000	hello	3.14	2.718281828	true	2025-01-15	2025-01-15 10:30:00
+2	200000000000	world	1.41	3.141592653	false	2025-06-30	2025-06-30 23:59:59
+3	NULL	NULL	NULL	NULL	true	NULL	NULL
+
+# --- CTAS duplicate table should fail ---
+
+statement error
+CREATE TABLE pm.__test_write.t_ctas_small AS SELECT 1 AS id;
+----
+already exist
+
+# --- CTAS with large dataset (exercises parallel sink) ---
+
+statement ok
+CREATE TABLE pm.__test_write.t_ctas_large AS
+    SELECT
+        i AS id,
+        i * 1000000000::BIGINT AS big_id,
+        'val_' || i::VARCHAR AS name,
+        (i * 0.1)::FLOAT AS score_f,
+        i * 0.001 AS score_d,
+        (i % 2 = 0) AS flag,
+        ('2020-01-01'::DATE + (i % 1000)::INTEGER)::DATE AS dt,
+        ('2020-01-01 00:00:00'::TIMESTAMP + INTERVAL (i) SECOND) AS ts
+    FROM generate_series(1, 100000) t(i);
+
+query I
+SELECT count(*) FROM pm.__test_write.t_ctas_large;
+----
+100000
+
+query II
+SELECT min(id), max(id) FROM pm.__test_write.t_ctas_large;
+----
+1	100000
+
+# --- CTAS into read-only catalog should fail ---
+
+statement ok
+DETACH pm;
+
+statement ok
+ATTACH './data' AS pm_ro (TYPE paimon, READ_ONLY);
+
+statement error
+CREATE TABLE pm_ro.__test_write.t_fail AS SELECT 1 AS id;
+----
+read-only
+
+statement ok
+DETACH pm_ro;
+
+# --- cleanup ---
+
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+statement ok
+DROP TABLE pm.__test_write.t_ctas_small;
+
+statement ok
+DROP TABLE pm.__test_write.t_ctas_large;
+
+statement ok
+DROP SCHEMA pm.__test_write;
+
+statement ok
+DETACH pm;

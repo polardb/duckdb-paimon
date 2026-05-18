@@ -93,6 +93,14 @@ public:
 		return attached_options;
 	}
 
+	AccessMode GetAccessMode() const {
+		return access_mode;
+	}
+
+	const string &GetPath() const {
+		return path;
+	}
+
 private:
 	string path;
 	AccessMode access_mode;
