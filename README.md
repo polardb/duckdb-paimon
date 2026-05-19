@@ -20,6 +20,8 @@ This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon
 ## Features
 
 - Read Paimon table data (local and remote OSS)
+- Write Paimon tables (CREATE TABLE AS, INSERT INTO; append-only tables only)
+- DDL support (CREATE/DROP SCHEMA, CREATE/DROP TABLE)
 - Projection pushdown optimization
 - Predicate pushdown optimization
 - Multiple file format support (manifest / data)
@@ -149,6 +151,35 @@ SELECT * FROM my_catalog.testdb.testtbl;
 
 -- For an OSS warehouse:
 -- ATTACH 'oss://my-bucket/warehouse' AS my_catalog (TYPE paimon);
+```
+
+### Write Data
+
+With an ATTACHed catalog, you can create schemas, create tables, and insert data using standard DuckDB SQL:
+
+```sql
+ATTACH './data' AS my_catalog (TYPE paimon);
+
+CREATE SCHEMA my_catalog.my_db;
+
+CREATE TABLE my_catalog.my_db.orders AS
+    SELECT 1 AS order_id, 99.9::DECIMAL(18,2) AS amount, 'Alice' AS customer;
+
+INSERT INTO my_catalog.my_db.orders
+    SELECT 2, 49.5, 'Bob'
+    UNION ALL
+    SELECT 3, 150.0, 'Charlie';
+
+SELECT * FROM my_catalog.my_db.orders ORDER BY order_id;
+
+DROP TABLE my_catalog.my_db.orders;
+DROP SCHEMA my_catalog.my_db;
+```
+
+To prevent accidental writes, attach the catalog in read-only mode:
+
+```sql
+ATTACH './data' AS my_catalog (TYPE paimon, READ_ONLY);
 ```
 
 ### Inspect Snapshot History
