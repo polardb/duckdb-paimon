@@ -109,7 +109,7 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 	} arrow_guard {arrow_schema};
 
 	vector<string> primary_keys;
-	for (auto &constraint : info.constraints) {
+	for (auto &constraint : base.constraints) {
 		if (constraint->type != ConstraintType::UNIQUE) {
 			continue;
 		}

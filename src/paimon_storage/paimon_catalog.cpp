@@ -23,6 +23,7 @@
  */
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -31,6 +32,7 @@
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
 #include "paimon/catalog/catalog.h"
@@ -240,9 +242,26 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 	return insert;
 }
 
-PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &, PhysicalPlanGenerator &, LogicalInsert &,
-                                            optional_ptr<PhysicalOperator>) {
-	throw NotImplementedException("PlanInsert not supported yet");
+PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
+                                            optional_ptr<PhysicalOperator> plan) {
+	if (access_mode == AccessMode::READ_ONLY) {
+		throw PermissionException("Cannot write to a read-only Paimon catalog");
+	}
+
+	auto &table = op.table;
+	auto table_path = path + "/" + table.schema.name + paimon::Catalog::DB_SUFFIX + "/" + table.name;
+	auto paimon_options = GetPaimonOptions(context, path, attached_options);
+
+	if (plan && !op.column_index_map.empty()) {
+		plan = planner.ResolveDefaultsProjection(op, *plan);
+	}
+
+	auto &insert = planner.Make<PhysicalPaimonInsert>(op, table.schema, nullptr, std::move(table_path),
+	                                                  std::move(paimon_options), 0U);
+	if (plan) {
+		insert.children.push_back(*plan);
+	}
+	return insert;
 }
 
 PhysicalOperator &PaimonCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,

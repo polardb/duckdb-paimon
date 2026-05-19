@@ -71,7 +71,71 @@ SELECT min(id), max(id) FROM pm.__test_write.t_ctas_large;
 ----
 1	100000
 
-# --- CTAS into read-only catalog should fail ---
+# --- INSERT INTO existing table ---
+
+statement ok
+INSERT INTO pm.__test_write.t_ctas_small
+    SELECT * FROM (VALUES
+        (4, 400000000000::BIGINT, 'duck', 6.28::FLOAT, 1.414213562::DOUBLE, FALSE, '2025-12-25'::DATE, '2025-12-25 00:00:00'::TIMESTAMP),
+        (5, 500000000000::BIGINT, 'paimon', 9.81::FLOAT, 2.236067977::DOUBLE, TRUE, '2025-07-04'::DATE, '2025-07-04 12:00:00'::TIMESTAMP)
+    ) t(id, big_id, name, score_f, score_d, flag, dt, ts);
+
+query I
+SELECT count(*) FROM pm.__test_write.t_ctas_small;
+----
+5
+
+query IITRRTTT
+SELECT * FROM pm.__test_write.t_ctas_small ORDER BY id;
+----
+1	100000000000	hello	3.14	2.718281828	true	2025-01-15	2025-01-15 10:30:00
+2	200000000000	world	1.41	3.141592653	false	2025-06-30	2025-06-30 23:59:59
+3	NULL	NULL	NULL	NULL	true	NULL	NULL
+4	400000000000	duck	6.28	1.414213562	false	2025-12-25	2025-12-25 00:00:00
+5	500000000000	paimon	9.81	2.236067977	true	2025-07-04	2025-07-04 12:00:00
+
+# --- INSERT INTO with large dataset ---
+
+statement ok
+INSERT INTO pm.__test_write.t_ctas_large
+    SELECT
+        i AS id,
+        i * 1000000000::BIGINT AS big_id,
+        'ins_' || i::VARCHAR AS name,
+        (i * 0.2)::FLOAT AS score_f,
+        i * 0.002 AS score_d,
+        (i % 2 = 1) AS flag,
+        ('2021-01-01'::DATE + (i % 500)::INTEGER)::DATE AS dt,
+        ('2021-01-01 00:00:00'::TIMESTAMP + INTERVAL (i) SECOND) AS ts
+    FROM generate_series(100001, 150000) t(i);
+
+query I
+SELECT count(*) FROM pm.__test_write.t_ctas_large;
+----
+150000
+
+query II
+SELECT min(id), max(id) FROM pm.__test_write.t_ctas_large;
+----
+1	150000
+
+# --- INSERT INTO with reordered / partial columns ---
+
+statement ok
+INSERT INTO pm.__test_write.t_ctas_small (name, id, flag, big_id, score_f, score_d, dt, ts)
+    VALUES ('reordered', 6, FALSE, 600000000000, 2.22, 0.123456789, '2025-03-15', '2025-03-15 08:00:00');
+
+statement ok
+INSERT INTO pm.__test_write.t_ctas_small (id, name)
+    VALUES (7, 'partial');
+
+query IITRRTTT
+SELECT * FROM pm.__test_write.t_ctas_small WHERE id >= 6 ORDER BY id;
+----
+6	600000000000	reordered	2.22	0.123456789	false	2025-03-15	2025-03-15 08:00:00
+7	NULL	partial	NULL	NULL	NULL	NULL	NULL
+
+# --- INSERT/CTAS into read-only catalog should fail ---
 
 statement ok
 DETACH pm;
@@ -81,6 +145,11 @@ ATTACH './data' AS pm_ro (TYPE paimon, READ_ONLY);
 
 statement error
 CREATE TABLE pm_ro.__test_write.t_fail AS SELECT 1 AS id;
+----
+read-only
+
+statement error
+INSERT INTO pm_ro.__test_write.t_ctas_small SELECT 1, 1::BIGINT, 'x', 1.0::FLOAT, 1.0, true, '2025-01-01'::DATE, '2025-01-01 00:00:00'::TIMESTAMP;
 ----
 read-only
 
