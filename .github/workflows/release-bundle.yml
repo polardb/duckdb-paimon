@@ -29,6 +29,8 @@ jobs:
             runner: ubuntu-22.04
           - bundle_arch: linux-arm64
             runner: ubuntu-22.04-arm
+          - bundle_arch: osx-arm64
+            runner: macos-14
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -56,7 +58,11 @@ jobs:
       - name: Build extension (release)
         shell: bash
         run: |
-          GEN=ninja make
+          if command -v ninja &>/dev/null; then
+            GEN=ninja make
+          else
+            make
+          fi
 
       - name: Package release bundle
         id: package
@@ -73,14 +79,22 @@ jobs:
           mkdir -p "${STAGE_DIR}"
 
           cp "${EXT_DIR}/paimon.duckdb_extension" "${STAGE_DIR}/"
-          cp "${EXT_DIR}"/libpaimon*.so* "${STAGE_DIR}/"
-          cp "${EXT_DIR}"/libjindosdk_c.so* "${STAGE_DIR}/"
+          case "${{ matrix.bundle_arch }}" in
+            linux-*) LIB_EXT="so" ;;
+            osx-*)   LIB_EXT="dylib" ;;
+          esac
+          cp "${EXT_DIR}"/libpaimon*."${LIB_EXT}"* "${STAGE_DIR}/"
+          cp "${EXT_DIR}"/libjindosdk_c*."${LIB_EXT}"* "${STAGE_DIR}/"
 
           cp LICENSE "${STAGE_DIR}/LICENSE"
           cp README.md "${STAGE_DIR}/README.md"
 
           tar -C dist -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
-          sha256sum "dist/${PKG_NAME}.tar.gz" > "dist/${PKG_NAME}.tar.gz.sha256"
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "dist/${PKG_NAME}.tar.gz" > "dist/${PKG_NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "dist/${PKG_NAME}.tar.gz" > "dist/${PKG_NAME}.tar.gz.sha256"
+          fi
 
           echo "archive=dist/${PKG_NAME}.tar.gz" >> "${GITHUB_OUTPUT}"
           echo "checksum=dist/${PKG_NAME}.tar.gz.sha256" >> "${GITHUB_OUTPUT}"
