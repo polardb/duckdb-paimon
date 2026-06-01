@@ -1,0 +1,19 @@
+diff --git a/cmake_modules/BuildUtils.cmake b/cmake_modules/BuildUtils.cmake
+index ed27ed7..1a4e79c 100644
+--- a/cmake_modules/BuildUtils.cmake
++++ b/cmake_modules/BuildUtils.cmake
+@@ -176,7 +176,13 @@ function(add_paimon_lib LIB_NAME)
+         target_link_libraries(${LIB_NAME}_shared
+                               PUBLIC "$<BUILD_INTERFACE:paimon_sanitizer_flags>")
+ 
+-        if(NOT APPLE)
++        if(APPLE)
++            # Arrow's checked_cast uses dynamic_cast in Debug builds, which
++            # fails across dylib boundaries on macOS due to duplicate RTTI
++            # from static Arrow archives.  Define NDEBUG so checked_cast
++            # falls back to static_cast (same as Release mode).
++            target_compile_definitions(${LIB_NAME}_objlib PRIVATE $<$<CONFIG:Debug>:NDEBUG>)
++        else()
+             target_link_options(${LIB_NAME}_shared
+                                 PRIVATE
+                                 -Wl,--exclude-libs,ALL
