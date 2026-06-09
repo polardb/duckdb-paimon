@@ -622,7 +622,8 @@ static unique_ptr<GlobalTableFunctionState> PaimonScanInitGlobal(ClientContext &
 	// construct the scanner
 	paimon::ScanContextBuilder scan_context_builder(path);
 
-	auto scan_context_result = scan_context_builder.SetOptions(bind.paimon_options).Finish();
+	auto scan_context_result =
+	    scan_context_builder.SetOptions(bind.paimon_options).SetPredicate(bind.predicates).Finish();
 	if (!scan_context_result.ok()) {
 		throw IOException(scan_context_result.status().ToString());
 	}
