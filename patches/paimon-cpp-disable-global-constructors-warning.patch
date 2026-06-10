@@ -1,0 +1,12 @@
+diff --git a/cmake_modules/SetupCxxFlags.cmake b/cmake_modules/SetupCxxFlags.cmake
+index 4df2f56..884f065 100644
+--- a/cmake_modules/SetupCxxFlags.cmake
++++ b/cmake_modules/SetupCxxFlags.cmake
+@@ -75,7 +75,6 @@ if("${BUILD_WARNING_LEVEL}" STREQUAL "CHECKIN")
+         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall")
+         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wextra")
+         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wdocumentation")
+-        set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wglobal-constructors")
+         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-missing-braces")
+         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unused-parameter")
+         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unknown-warning-option")
