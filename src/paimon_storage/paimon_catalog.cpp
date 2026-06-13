@@ -30,12 +30,14 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
 #include "paimon/catalog/catalog.h"
+#include "paimon/schema/schema.h"
 
 #include "paimon_catalog.hpp"
 #include "paimon_insert.hpp"
@@ -236,8 +238,10 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 	auto table_path = path + "/" + base.schema + paimon::Catalog::DB_SUFFIX + "/" + base.table;
 	auto paimon_options = GetPaimonOptions(context, path, attached_options);
 
+	vector<string> part_keys;
+
 	auto &insert = planner.Make<PhysicalPaimonInsert>(op, op.schema, std::move(op.info), std::move(table_path),
-	                                                  std::move(paimon_options), 0U);
+	                                                  std::move(paimon_options), std::move(part_keys), 0U);
 	insert.children.push_back(plan);
 	return insert;
 }
@@ -252,12 +256,22 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 	auto table_path = path + "/" + table.schema.name + paimon::Catalog::DB_SUFFIX + "/" + table.name;
 	auto paimon_options = GetPaimonOptions(context, path, attached_options);
 
+	vector<string> part_keys;
+	auto schema_result = paimon_catalog->LoadTableSchema(paimon::Identifier(table.schema.name, table.name));
+	if (schema_result.ok()) {
+		auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(schema_result.value());
+		if (data_schema) {
+			auto &partition_keys = data_schema->PartitionKeys();
+			part_keys.assign(partition_keys.begin(), partition_keys.end());
+		}
+	}
+
 	if (plan && !op.column_index_map.empty()) {
 		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
 
 	auto &insert = planner.Make<PhysicalPaimonInsert>(op, table.schema, nullptr, std::move(table_path),
-	                                                  std::move(paimon_options), 0U);
+	                                                  std::move(paimon_options), std::move(part_keys), 0U);
 	if (plan) {
 		insert.children.push_back(*plan);
 	}
