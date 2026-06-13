@@ -1,0 +1,265 @@
+# name: test/sql/partition_filter_pushdown.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+# --- cleanup from prior runs ---
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_part_filter.t1;
+
+statement ok
+DROP SCHEMA IF EXISTS pm.__test_part_filter CASCADE;
+
+# --- setup ---
+
+statement ok
+CREATE SCHEMA pm.__test_part_filter;
+
+statement ok
+CREATE TABLE pm.__test_part_filter.t1 (
+    id INTEGER,
+    dt VARCHAR,
+    region VARCHAR,
+    value INTEGER
+) PARTITIONED BY (dt, region);
+
+statement ok
+INSERT INTO pm.__test_part_filter.t1
+    SELECT
+        i AS id,
+        CASE (i - 1) % 4
+            WHEN 0 THEN '2024-02-01'
+            WHEN 1 THEN '2024-02-02'
+            WHEN 2 THEN '2024-02-03'
+            ELSE '2024-02-04'
+        END AS dt,
+        CASE (i - 1) % 3
+            WHEN 0 THEN 'us'
+            WHEN 1 THEN 'eu'
+            ELSE 'apac'
+        END AS region,
+        i * 10 AS value
+    FROM generate_series(1, 60) t(i);
+
+# --- full scan: all 12 partitions are planned ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=12);
+----
+60	1	60	18300
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=12)
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- single partition key equality: one dt maps to three region partitions ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=3)
+WHERE dt = '2024-02-01';
+----
+15	1	57	4350
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=3)
+    WHERE dt = '2024-02-01'
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE dt = '2024-02-01'
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- multiple partition key equalities: one exact partition is planned ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=1)
+WHERE dt = '2024-02-01' AND region = 'us';
+----
+5	1	49	1250
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=1)
+    WHERE dt = '2024-02-01' AND region = 'us'
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE dt = '2024-02-01' AND region = 'us'
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- OR over one partition key: two dates map to six region partitions ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=6)
+WHERE dt = '2024-02-01' OR dt = '2024-02-03';
+----
+30	1	59	9000
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=6)
+    WHERE dt = '2024-02-01' OR dt = '2024-02-03'
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE dt = '2024-02-01' OR dt = '2024-02-03'
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- AND-of-OR partition filter expansion: four exact partitions are planned ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=4)
+WHERE (dt = '2024-02-01' OR dt = '2024-02-03')
+  AND (region = 'us' OR region = 'apac');
+----
+20	1	57	5800
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=4)
+    WHERE (dt = '2024-02-01' OR dt = '2024-02-03')
+      AND (region = 'us' OR region = 'apac')
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE (dt = '2024-02-01' OR dt = '2024-02-03')
+      AND (region = 'us' OR region = 'apac')
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- partition filter plus residual filter: partition pruning happens before read filtering ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=3)
+WHERE dt = '2024-02-02' AND value BETWEEN 250 AND 450;
+----
+5	26	42	1700
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=3)
+    WHERE dt = '2024-02-02' AND value BETWEEN 250 AND 450
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE dt = '2024-02-02' AND value BETWEEN 250 AND 450
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- non-partition filter: no partition pruning is expected ---
+
+query IIII
+SELECT count(*), min(id), max(id), sum(value)::BIGINT
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=12)
+WHERE value >= 400;
+----
+21	40	60	10500
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=12)
+    WHERE value >= 400
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE value >= 400
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- missing partition: no splits are planned ---
+
+query I
+SELECT count(*)
+FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=0)
+WHERE dt = '2024-12-31';
+----
+0
+
+query I
+WITH direct AS (
+    SELECT * FROM paimon_scan('./data/__test_part_filter.db/t1', debug_expected_splits=0)
+    WHERE dt = '2024-12-31'
+),
+attached AS (
+    SELECT * FROM pm.__test_part_filter.t1
+    WHERE dt = '2024-12-31'
+)
+SELECT count(*) FROM (
+    (SELECT * FROM direct EXCEPT ALL SELECT * FROM attached)
+    UNION ALL
+    (SELECT * FROM attached EXCEPT ALL SELECT * FROM direct)
+);
+----
+0
+
+# --- cleanup ---
+
+statement ok
+DROP TABLE pm.__test_part_filter.t1;
+
+statement ok
+DROP SCHEMA pm.__test_part_filter;
+
+statement ok
+DETACH pm;

@@ -3,6 +3,12 @@
 
 require paimon
 
+# predicate pushdown: full table scan plans one split
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=1);
+----
+9
+
 # predicate pushdown: equality
 query II
 SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 = 1;
@@ -13,7 +19,7 @@ Cathy	1
 
 # predicate pushdown: equality with no match
 query II
-SELECT f0, f3 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f3 = 16.0;
+SELECT f0, f3 FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=0) WHERE f3 = 16.0;
 ----
 
 # predicate pushdown: AND with unconvertible child (partial pushdown)
@@ -79,7 +85,7 @@ Iris	3	2
 
 # predicate pushdown: nested AND inside OR with no match (filter impossible partitions)
 query III
-SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl') WHERE (f1 = 1 AND f2 = 3) OR (f1 = 3 AND f2 = 3);
+SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=0) WHERE (f1 = 1 AND f2 = 3) OR (f1 = 3 AND f2 = 3);
 ----
 
 # predicate pushdown: IN
@@ -103,7 +109,7 @@ Grace	0
 
 # predicate pushdown: IN with no match
 query II
-SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 IN (4, 5);
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=0) WHERE f1 IN (4, 5);
 ----
 
 # predicate pushdown: NOT IN
@@ -211,7 +217,7 @@ Iris	3
 
 # predicate pushdown: IS NULL (no nulls in test data, expect empty result)
 query II
-SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f0 IS NULL;
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=0) WHERE f0 IS NULL;
 ----
 
 # predicate pushdown: IS NOT NULL (no nulls in test data, expect all rows)
@@ -230,7 +236,7 @@ Iris	3
 
 # predicate pushdown: IS NULL on integer column
 query II
-SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 IS NULL;
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=0) WHERE f1 IS NULL;
 ----
 
 # predicate pushdown: IS NOT NULL combined with AND

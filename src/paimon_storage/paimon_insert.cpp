@@ -24,13 +24,19 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
+#include "duckdb/common/arrow/arrow_wrapper.hpp"
 
+#include "paimon/catalog/catalog.h"
+#include "paimon/catalog/identifier.h"
 #include "paimon/commit_context.h"
+#include "paimon/defs.h"
 #include "paimon/file_store_commit.h"
 #include "paimon/file_store_write.h"
 #include "paimon/record_batch.h"
+#include "paimon/schema/schema.h"
 #include "paimon/write_context.h"
 
+#include "paimon_catalog.hpp"
 #include "paimon_insert.hpp"
 #include "paimon_schema_entry.hpp"
 
@@ -41,10 +47,11 @@ namespace duckdb {
 
 PhysicalPaimonInsert::PhysicalPaimonInsert(PhysicalPlan &physical_plan, LogicalOperator &op, SchemaCatalogEntry &schema,
                                            unique_ptr<BoundCreateTableInfo> info, string table_path,
-                                           map<string, string> paimon_options, idx_t estimated_cardinality)
+                                           map<string, string> paimon_options, vector<string> partition_keys,
+                                           idx_t estimated_cardinality)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, {LogicalType::BIGINT}, estimated_cardinality),
       schema(&schema), info(std::move(info)), table_path(std::move(table_path)),
-      paimon_options(std::move(paimon_options)) {
+      paimon_options(std::move(paimon_options)), partition_keys(std::move(partition_keys)) {
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +64,10 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 	std::vector<std::shared_ptr<paimon::CommitMessage>> all_commit_messages;
 	idx_t insert_count = 0;
 	bool finished = false;
+
+	vector<string> part_key_names;
+	vector<idx_t> part_col_idxs;
+	string null_part_name = "__DEFAULT_PARTITION__";
 };
 
 struct PaimonInsertLocalState : public LocalSinkState {
@@ -75,6 +86,40 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 		auto &paimon_schema = schema->Cast<PaimonSchemaEntry>();
 		auto txn = CatalogTransaction::GetSystemCatalogTransaction(context);
 		paimon_schema.CreateTable(txn, *info);
+	}
+
+	if (!partition_keys.empty()) {
+		auto &paimon_catalog = schema->catalog.Cast<PaimonCatalog>();
+		auto &catalog = paimon_catalog.GetPaimonCatalog();
+		auto schema_name = info ? info->Base().schema : schema->name;
+		auto table_name = info ? info->Base().table : string();
+
+		if (table_name.empty()) {
+			auto last_slash = table_path.rfind('/');
+			table_name = (last_slash != string::npos) ? table_path.substr(last_slash + 1) : table_path;
+		}
+
+		auto schema_result = catalog.LoadTableSchema(paimon::Identifier(schema_name, table_name));
+		if (schema_result.ok()) {
+			auto table_schema = schema_result.value();
+			auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(table_schema);
+			if (data_schema) {
+				auto &table_options = data_schema->Options();
+				auto default_name = table_options.find(paimon::Options::PARTITION_DEFAULT_NAME);
+				if (default_name != table_options.end()) {
+					state->null_part_name = default_name->second;
+				}
+			}
+
+			auto field_names = table_schema->FieldNames();
+			state->part_key_names = partition_keys;
+			for (auto &part_key : partition_keys) {
+				auto it = std::find(field_names.begin(), field_names.end(), part_key);
+				if (it != field_names.end()) {
+					state->part_col_idxs.push_back(std::distance(field_names.begin(), it));
+				}
+			}
+		}
 	}
 
 	return std::move(state);
@@ -101,22 +146,16 @@ unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionCont
 	return std::move(lstate);
 }
 
-SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
-	auto &lstate = input.local_state.Cast<PaimonInsertLocalState>();
+static void WriteChunkWithPartition(PaimonInsertLocalState &lstate, DataChunk &chunk, ClientContext &client,
+                                    const std::map<string, string> &partition) {
+	ArrowArrayWrapper arrow_wrapper;
+	auto client_props = client.GetClientProperties();
+	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, client_props, {});
 
-	ArrowArray out_array {};
-	auto client_props = context.client.GetClientProperties();
-	ArrowConverter::ToArrowArray(chunk, &out_array, client_props, {});
-	struct ArrowArrayGuard {
-		ArrowArray &array;
-		~ArrowArrayGuard() {
-			if (array.release) {
-				array.release(&array);
-			}
-		}
-	} arrow_guard {out_array};
-
-	paimon::RecordBatchBuilder batch_builder(&out_array);
+	paimon::RecordBatchBuilder batch_builder(&arrow_wrapper.arrow_array);
+	if (!partition.empty()) {
+		batch_builder.SetPartition(partition).SetBucket(0);
+	}
 	auto batch_result = batch_builder.Finish();
 	if (!batch_result.ok()) {
 		throw IOException(batch_result.status().ToString());
@@ -126,8 +165,65 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 	if (!status.ok()) {
 		throw IOException(status.ToString());
 	}
+}
 
-	lstate.local_count += chunk.size();
+SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
+	auto &gstate = input.global_state.Cast<PaimonInsertGlobalState>();
+	auto &lstate = input.local_state.Cast<PaimonInsertLocalState>();
+
+	if (gstate.part_col_idxs.empty()) {
+		WriteChunkWithPartition(lstate, chunk, context.client, {});
+		lstate.local_count += chunk.size();
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+	auto num_rows = chunk.size();
+	auto &part_idxs = gstate.part_col_idxs;
+	auto &part_names = gstate.part_key_names;
+	D_ASSERT(part_idxs.size() == part_names.size());
+
+	vector<UnifiedVectorFormat> part_formats(part_idxs.size());
+	for (idx_t i = 0; i < part_idxs.size(); i++) {
+		chunk.data[part_idxs[i]].ToUnifiedFormat(num_rows, part_formats[i]);
+	}
+
+	std::map<std::vector<string>, vector<idx_t>> partition_groups;
+	for (idx_t row = 0; row < num_rows; row++) {
+		std::vector<string> key;
+		key.reserve(part_idxs.size());
+		for (idx_t i = 0; i < part_idxs.size(); i++) {
+			auto idx = part_formats[i].sel->get_index(row);
+			if (!part_formats[i].validity.RowIsValid(idx)) {
+				key.push_back(gstate.null_part_name);
+			} else {
+				key.push_back(chunk.GetValue(part_idxs[i], row).ToString());
+			}
+		}
+		partition_groups[key].push_back(row);
+	}
+
+	for (auto &entry : partition_groups) {
+		auto &key_values = entry.first;
+		auto &row_indices = entry.second;
+
+		std::map<string, string> partition;
+		for (idx_t i = 0; i < part_names.size(); i++) {
+			partition[part_names[i]] = key_values[i];
+		}
+
+		SelectionVector sel(row_indices.size());
+		for (idx_t i = 0; i < row_indices.size(); i++) {
+			sel.set_index(i, row_indices[i]);
+		}
+
+		DataChunk sub_chunk;
+		sub_chunk.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes());
+		sub_chunk.Slice(chunk, sel, row_indices.size());
+
+		WriteChunkWithPartition(lstate, sub_chunk, context.client, partition);
+	}
+
+	lstate.local_count += num_rows;
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
