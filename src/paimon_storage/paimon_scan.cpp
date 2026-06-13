@@ -58,6 +58,12 @@ public:
 
 	std::shared_ptr<paimon::Predicate> predicates = nullptr;
 
+	vector<string> part_keys;
+	std::vector<std::map<std::string, std::string>> part_filters;
+	// Debug-only test hook: assert the planned split count before any
+	// reader-level or DuckDB-level filtering can affect the result.
+	std::optional<idx_t> debug_expected_splits;
+
 	string table_schema_json;
 };
 
@@ -397,6 +403,105 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 	}
 }
 
+static bool TryExtractPartitionFilter(const Expression &expr, LogicalGet &get,
+                                      const unordered_set<string> &part_keys, map<string, string> &filter) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COMPARISON: {
+		auto &comp = expr.Cast<BoundComparisonExpression>();
+		if (comp.type != ExpressionType::COMPARE_EQUAL) {
+			break;
+		}
+
+		Expression *col_expr = nullptr;
+		Expression *const_expr = nullptr;
+
+		if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		    comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			col_expr = comp.left.get();
+			const_expr = comp.right.get();
+		} else if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+		           comp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			col_expr = comp.right.get();
+			const_expr = comp.left.get();
+		} else {
+			break;
+		}
+
+		auto col_idx = get.GetColumnIds()[col_expr->Cast<BoundColumnRefExpression>().binding.column_index];
+		auto &col_name = get.GetColumnName(col_idx);
+
+		// Only extract filters on partition key columns.
+		if (part_keys.find(col_name) == part_keys.end()) {
+			break;
+		}
+
+		// NULL partition values cannot be used for partition pruning.
+		auto &val = const_expr->Cast<BoundConstantExpression>().value;
+		if (val.IsNull()) {
+			break;
+		}
+
+		filter[col_name] = val.ToString();
+		return true;
+	}
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		// OR is handled by the outer TryExtractPartitionFilters.
+		if (conj.type != ExpressionType::CONJUNCTION_AND) {
+			break;
+		}
+		for (auto &child : conj.children) {
+			if (!TryExtractPartitionFilter(*child, get, part_keys, filter)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	default:
+		break;
+	}
+	return false;
+}
+
+static vector<map<string, string>> TryExtractPartitionFilters(const Expression &expr, LogicalGet &get,
+                                                              const unordered_set<string> &part_keys) {
+	switch (expr.GetExpressionClass()) {
+	// Single comparison: extract as one partition filter.
+	case ExpressionClass::BOUND_COMPARISON: {
+		map<string, string> filter;
+		if (TryExtractPartitionFilter(expr, get, part_keys, filter)) {
+			return {std::move(filter)};
+		}
+		break;
+	}
+	// AND: collect all conjuncts into one filter.
+	// OR: each disjunct becomes a separate filter; bail out if any fails.
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		if (conj.type == ExpressionType::CONJUNCTION_AND) {
+			map<string, string> filter;
+			if (TryExtractPartitionFilter(expr, get, part_keys, filter)) {
+				return {std::move(filter)};
+			}
+		} else if (conj.type == ExpressionType::CONJUNCTION_OR) {
+			vector<map<string, string>> filters;
+			for (auto &child : conj.children) {
+				map<string, string> filter;
+				if (!TryExtractPartitionFilter(*child, get, part_keys, filter)) {
+					return {};
+				}
+				filters.push_back(std::move(filter));
+			}
+			return filters;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+	return {};
+}
+
 static void PaimonPushdownFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
                                  vector<unique_ptr<Expression>> &filters) {
 	auto &bind = bind_data->Cast<PaimonScanBindData>();
@@ -425,6 +530,49 @@ static void PaimonPushdownFilter(ClientContext &context, LogicalGet &get, Functi
 	} else {
 		bind.predicates = nullptr;
 	}
+
+	// Extract equality conditions on partition keys into a separate structure
+	// so that paimon-cpp can prune entire partitions during scan planning,
+	// before any data files are read.
+	//
+	// The top-level filters vector has AND semantics (DuckDB splits
+	// conjuncts into separate entries).  Each entry may yield one filter
+	// map (simple equality) or multiple maps (from OR).  We compute the
+	// cross-product across entries and merge maps within each combination,
+	// mirroring the manual And() applied for predicate pushdown above.
+	if (!bind.part_keys.empty()) {
+		unordered_set<string> part_keys(bind.part_keys.begin(), bind.part_keys.end());
+
+		vector<vector<map<string, string>>> per_expr;
+		for (idx_t i = 0; i < filters.size(); i++) {
+			auto part_filter = TryExtractPartitionFilters(*filters[i], get, part_keys);
+			// Filters unrelated to partition keys produce an empty vector
+			// and are excluded from the cross-product below.
+			if (!part_filter.empty()) {
+				per_expr.push_back(std::move(part_filter));
+			}
+		}
+
+		// Cross-product: per_expr entries have AND semantics (from
+		// DuckDB's top-level conjunct split), while maps within each
+		// entry have OR semantics.  Expanding AND-of-ORs into OR-of-ANDs
+		// (DNF) is a cartesian product that merges maps pairwise.
+		if (!per_expr.empty()) {
+			vector<map<string, string>> combined = std::move(per_expr[0]);
+			for (idx_t i = 1; i < per_expr.size(); i++) {
+				vector<map<string, string>> next;
+				for (auto &existing : combined) {
+					for (auto &incoming : per_expr[i]) {
+						auto merged = existing;
+						merged.insert(incoming.begin(), incoming.end());
+						next.push_back(std::move(merged));
+					}
+				}
+				combined = std::move(next);
+			}
+			bind.part_filters = std::move(combined);
+		}
+	}
 }
 
 static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunctionBindInput &input,
@@ -435,6 +583,14 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	bind_data->path = path;
 
 	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
+	auto expected_splits = scan_options.find("debug_expected_splits");
+	if (expected_splits != scan_options.end()) {
+		auto expected_value = expected_splits->second.GetValue<int64_t>();
+		if (expected_value < 0) {
+			throw InvalidInputException("'debug_expected_splits' must be non-negative");
+		}
+		bind_data->debug_expected_splits = NumericCast<idx_t>(expected_value);
+	}
 	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
 	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, path.warehouse, scan_options);
 
@@ -443,6 +599,12 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		throw IOException(table_schema_result.status().ToString());
 	}
 	auto table_schema = std::move(table_schema_result).value();
+
+	auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(table_schema);
+	if (data_schema) {
+		auto &part_keys = data_schema->PartitionKeys();
+		bind_data->part_keys.assign(part_keys.begin(), part_keys.end());
+	}
 
 	auto json_schema_result = table_schema->GetJsonSchema();
 	if (!json_schema_result.ok()) {
@@ -622,8 +784,11 @@ static unique_ptr<GlobalTableFunctionState> PaimonScanInitGlobal(ClientContext &
 	// construct the scanner
 	paimon::ScanContextBuilder scan_context_builder(path);
 
-	auto scan_context_result =
-	    scan_context_builder.SetOptions(bind.paimon_options).SetPredicate(bind.predicates).Finish();
+	scan_context_builder.SetOptions(bind.paimon_options).SetPredicate(bind.predicates);
+	if (!bind.part_filters.empty()) {
+		scan_context_builder.SetPartitionFilter(bind.part_filters);
+	}
+	auto scan_context_result = scan_context_builder.Finish();
 	if (!scan_context_result.ok()) {
 		throw IOException(scan_context_result.status().ToString());
 	}
@@ -642,6 +807,11 @@ static unique_ptr<GlobalTableFunctionState> PaimonScanInitGlobal(ClientContext &
 	auto plan = std::move(plan_result).value();
 
 	state->splits = plan->Splits();
+	if (bind.debug_expected_splits.has_value() && state->splits.size() != bind.debug_expected_splits.value()) {
+		throw InvalidInputException("Paimon scan planned %llu split(s), expected %llu",
+		                            NumericCast<unsigned long long>(state->splits.size()),
+		                            NumericCast<unsigned long long>(bind.debug_expected_splits.value()));
+	}
 	state->path = path;
 	state->arrow_table = bind.arrow_table;
 
@@ -708,6 +878,8 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	fun.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated: auto-detected from table schema
 	fun.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
 	fun.named_parameters["snapshot_from_timestamp"] = LogicalType::TIMESTAMP;
+	// Debug-only test hook, not part of the public paimon_scan API.
+	fun.named_parameters["debug_expected_splits"] = LogicalType::BIGINT;
 	fun.init_local = PaimonScanInitLocal;
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
@@ -718,6 +890,8 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated
 	fun_fullpath.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
 	fun_fullpath.named_parameters["snapshot_from_timestamp"] = LogicalType::TIMESTAMP;
+	// Debug-only test hook, not part of the public paimon_scan API.
+	fun_fullpath.named_parameters["debug_expected_splits"] = LogicalType::BIGINT;
 	fun_fullpath.init_local = PaimonScanInitLocal;
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;
