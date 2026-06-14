@@ -67,7 +67,8 @@ public:
 	string table_schema_json;
 };
 
-static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundComparisonExpression &comp, LogicalGet &get) {
+static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundComparisonExpression &comp,
+                                                               const LogicalGet &get) {
 	// early exit: only handle comparison types supported by paimon-cpp
 	switch (comp.type) {
 	case ExpressionType::COMPARE_EQUAL:
@@ -130,7 +131,8 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 }
 
-static std::shared_ptr<paimon::Predicate> TryConvertBetween(const BoundBetweenExpression &between, LogicalGet &get) {
+static std::shared_ptr<paimon::Predicate> TryConvertBetween(const BoundBetweenExpression &between,
+                                                            const LogicalGet &get) {
 	if (between.input->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
 	    between.lower->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
 	    between.upper->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
@@ -169,9 +171,9 @@ static std::shared_ptr<paimon::Predicate> TryConvertBetween(const BoundBetweenEx
 }
 
 // Forward declaration for mutual recursion with TryConvertOperator.
-static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get);
+static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, const LogicalGet &get);
 
-static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperatorExpression &op, LogicalGet &get) {
+static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperatorExpression &op, const LogicalGet &get) {
 	// Validate children count per operator type.
 	switch (op.type) {
 	case ExpressionType::COMPARE_IN:
@@ -257,7 +259,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 }
 
 static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConjunctionExpression &conj,
-                                                                LogicalGet &get) {
+                                                                const LogicalGet &get) {
 	std::vector<std::shared_ptr<paimon::Predicate>> predicates;
 
 	for (auto &child : conj.children) {
@@ -314,7 +316,8 @@ static PushdownFunction ClassifyFunction(const string &name) {
 	return PushdownFunction::UNSUPPORTED;
 }
 
-static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunctionExpression &func, LogicalGet &get) {
+static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunctionExpression &func,
+                                                             const LogicalGet &get) {
 	// Gate: reject unsupported functions early.
 	auto func_type = ClassifyFunction(func.function.name);
 	if (func_type == PushdownFunction::UNSUPPORTED) {
@@ -386,7 +389,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunction
 	}
 }
 
-static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, LogicalGet &get) {
+static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, const LogicalGet &get) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_COMPARISON:
 		return TryConvertComparison(expr.Cast<BoundComparisonExpression>(), get);
@@ -403,8 +406,8 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 	}
 }
 
-static bool TryExtractPartitionFilter(const Expression &expr, LogicalGet &get, const unordered_set<string> &part_keys,
-                                      map<string, string> &part_filter) {
+static bool TryExtractPartitionFilter(const Expression &expr, const LogicalGet &get,
+                                      const unordered_set<string> &part_keys, map<string, string> &part_filter) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_COMPARISON: {
 		auto &comp = expr.Cast<BoundComparisonExpression>();
@@ -467,7 +470,7 @@ static bool TryExtractPartitionFilter(const Expression &expr, LogicalGet &get, c
 	return false;
 }
 
-static vector<map<string, string>> TryExtractPartitionFilters(const Expression &filter, LogicalGet &get,
+static vector<map<string, string>> TryExtractPartitionFilters(const Expression &filter, const LogicalGet &get,
                                                               const unordered_set<string> &part_keys) {
 	switch (filter.GetExpressionClass()) {
 	// Single comparison: extract as one partition filter.
