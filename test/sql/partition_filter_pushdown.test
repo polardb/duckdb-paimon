@@ -1,0 +1,13 @@
+# name: test/sql/partition_filter_pushdown.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+# DuckDB 1.4 does not parse CREATE TABLE ... PARTITIONED BY (...), so the
+# partitioned-table coverage for this feature lives on the DuckDB 1.5 branch.
+
+statement ok
+DETACH pm;
