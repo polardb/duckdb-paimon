@@ -40,12 +40,13 @@ public:
 
 	PhysicalPaimonInsert(PhysicalPlan &physical_plan, LogicalOperator &op, SchemaCatalogEntry &schema,
 	                     unique_ptr<BoundCreateTableInfo> info, string table_path, map<string, string> paimon_options,
-	                     idx_t estimated_cardinality);
+	                     vector<string> part_keys, idx_t estimated_cardinality);
 
 	SchemaCatalogEntry *schema;
 	unique_ptr<BoundCreateTableInfo> info;
 	string table_path;
 	map<string, string> paimon_options;
+	vector<string> part_keys;
 
 public:
 	bool IsSink() const override {
