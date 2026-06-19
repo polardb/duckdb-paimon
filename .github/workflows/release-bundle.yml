@@ -26,9 +26,11 @@ jobs:
       matrix:
         include:
           - bundle_arch: linux-amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
+            manylinux_image: x86_64
           - bundle_arch: linux-arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
+            manylinux_image: aarch64
           - bundle_arch: osx-arm64
             runner: macos-14
     steps:
@@ -55,7 +57,34 @@ jobs:
           git -C duckdb fetch --force --tags
           git -C duckdb describe --tags --long
 
-      - name: Build extension (release)
+      - name: Build extension (release, Linux)
+        if: startsWith(matrix.bundle_arch, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE="$(pwd)"
+          docker run --rm \
+            -v "${WORKSPACE}:${WORKSPACE}" \
+            -e GEN=ninja \
+            -e CC=gcc \
+            -e CXX=g++ \
+            quay.io/pypa/manylinux_2_28_${{ matrix.manylinux_image }} \
+            bash -c "
+              set -euo pipefail
+              umask 022
+              cat /etc/os-release
+              dnf install -y \
+                ninja-build \
+                perl-IPC-Cmd
+              git config --global --add safe.directory \"${WORKSPACE}\"
+              git config --global --add safe.directory \"${WORKSPACE}/duckdb\"
+              git config --global --add safe.directory \"${WORKSPACE}/extension-ci-tools\"
+              git config --global --add safe.directory \"${WORKSPACE}/third_party/paimon-cpp\"
+              make -C \"${WORKSPACE}\"
+            "
+
+      - name: Build extension (release, non-Linux)
+        if: ${{ !startsWith(matrix.bundle_arch, 'linux-') }}
         shell: bash
         run: |
           if command -v ninja &>/dev/null; then
