@@ -1,0 +1,93 @@
+# name: test/sql/paimon_count_stats.test
+# group: [sql]
+
+require paimon
+
+require no_alternative_verify
+
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+statement ok
+DROP TABLE IF EXISTS pm.__test_count_stats.t1;
+
+statement ok
+DROP SCHEMA IF EXISTS pm.__test_count_stats CASCADE;
+
+statement ok
+CREATE SCHEMA pm.__test_count_stats;
+
+statement ok
+CREATE TABLE pm.__test_count_stats.t1 (
+    id INTEGER,
+    dt VARCHAR
+) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO pm.__test_count_stats.t1
+    SELECT
+        i AS id,
+        CASE i % 2
+            WHEN 0 THEN '2024-02-01'
+            ELSE '2024-02-02'
+        END AS dt
+    FROM generate_series(1, 12) t(i);
+
+query II
+EXPLAIN SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl');
+----
+physical_plan	<REGEX>:.*COLUMN_DATA_SCAN.*
+
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl');
+----
+9
+
+query II
+EXPLAIN SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 = 1;
+----
+physical_plan	<REGEX>:.*PAIMON_SCAN.*
+
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 = 1;
+----
+3
+
+query II
+EXPLAIN SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl') WHERE cast(f1 AS VARCHAR) = '1';
+----
+physical_plan	<REGEX>:.*PAIMON_SCAN.*
+
+query I
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl') WHERE cast(f1 AS VARCHAR) = '1';
+----
+3
+
+query II
+EXPLAIN SELECT count(*) FROM paimon_scan('./data/__test_count_stats.db/t1');
+----
+physical_plan	<REGEX>:.*COLUMN_DATA_SCAN.*
+
+query I
+SELECT count(*) FROM paimon_scan('./data/__test_count_stats.db/t1');
+----
+12
+
+query II
+EXPLAIN SELECT count(*) FROM paimon_scan('./data/__test_count_stats.db/t1') WHERE dt = '2024-02-01';
+----
+physical_plan	<REGEX>:.*PAIMON_SCAN.*
+
+query I
+SELECT count(*) FROM paimon_scan('./data/__test_count_stats.db/t1') WHERE dt = '2024-02-01';
+----
+6
+
+statement ok
+DROP TABLE pm.__test_count_stats.t1;
+
+statement ok
+DROP SCHEMA pm.__test_count_stats;
+
+statement ok
+DETACH pm;
