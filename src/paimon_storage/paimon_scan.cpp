@@ -24,6 +24,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/constants.hpp"
+#include "duckdb/function/partition_stats.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
@@ -51,6 +52,7 @@ namespace duckdb {
 struct PaimonScanBindData : public TableFunctionData {
 public:
 	PaimonTablePath path;
+	string table_data_path;
 
 	map<string, string> paimon_options;
 
@@ -609,6 +611,7 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 
 	auto path = PaimonTablePath::Parse(input.inputs);
 	bind_data->path = path;
+	bind_data->table_data_path = path.warehouse + "/" + path.dbname + paimon::Catalog::DB_SUFFIX + "/" + path.tablename;
 
 	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
 	auto expected_splits = scan_options.find("debug_expected_splits");
@@ -674,6 +677,34 @@ struct PaimonScanGlobalState : public GlobalTableFunctionState {
 		return splits.size();
 	}
 };
+
+static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const PaimonScanBindData &bind) {
+	paimon::ScanContextBuilder scan_context_builder(bind.table_data_path);
+	scan_context_builder.SetOptions(bind.paimon_options).SetPredicate(bind.predicates);
+	if (!bind.part_filters.empty()) {
+		scan_context_builder.SetPartitionFilter(bind.part_filters);
+	}
+
+	auto scan_context_result = scan_context_builder.Finish();
+	if (!scan_context_result.ok()) {
+		throw IOException(scan_context_result.status().ToString());
+	}
+	auto scan_context = std::move(scan_context_result).value();
+
+	auto scanner_result = paimon::TableScan::Create(std::move(scan_context));
+	if (!scanner_result.ok()) {
+		throw IOException(scanner_result.status().ToString());
+	}
+	auto scanner = std::move(scanner_result).value();
+
+	auto plan_result = scanner->CreatePlan();
+	if (!plan_result.ok()) {
+		throw IOException(plan_result.status().ToString());
+	}
+	auto plan = std::move(plan_result).value();
+
+	return plan->Splits();
+}
 
 struct PaimonScanLocalState : public LocalTableFunctionState {
 public:
@@ -809,43 +840,70 @@ static unique_ptr<GlobalTableFunctionState> PaimonScanInitGlobal(ClientContext &
 		state->paimon_predicates = pred_res.value();
 	}
 
-	auto path = bind.path.warehouse + "/" + bind.path.dbname + paimon::Catalog::DB_SUFFIX + "/" + bind.path.tablename;
-
-	// construct the scanner
-	paimon::ScanContextBuilder scan_context_builder(path);
-
-	scan_context_builder.SetOptions(bind.paimon_options).SetPredicate(bind.predicates);
-	if (!bind.part_filters.empty()) {
-		scan_context_builder.SetPartitionFilter(bind.part_filters);
-	}
-	auto scan_context_result = scan_context_builder.Finish();
-	if (!scan_context_result.ok()) {
-		throw IOException(scan_context_result.status().ToString());
-	}
-	auto scan_context = std::move(scan_context_result).value();
-
-	auto scanner_result = paimon::TableScan::Create(std::move(scan_context));
-	if (!scanner_result.ok()) {
-		throw IOException(scanner_result.status().ToString());
-	}
-	auto scanner = std::move(scanner_result).value();
-
-	auto plan_result = scanner->CreatePlan();
-	if (!plan_result.ok()) {
-		throw IOException(plan_result.status().ToString());
-	}
-	auto plan = std::move(plan_result).value();
-
-	state->splits = plan->Splits();
+	state->splits = CreatePaimonScanSplits(bind);
 	if (bind.debug_expected_splits.has_value() && state->splits.size() != bind.debug_expected_splits.value()) {
 		throw InvalidInputException("Paimon scan planned %llu split(s), expected %llu",
 		                            NumericCast<unsigned long long>(state->splits.size()),
 		                            NumericCast<unsigned long long>(bind.debug_expected_splits.value()));
 	}
-	state->path = path;
+	state->path = bind.table_data_path;
 	state->arrow_table = bind.arrow_table;
 
 	return std::move(state);
+}
+
+static vector<PartitionStatistics> PaimonGetPartitionStats(ClientContext &, GetPartitionStatsInput &input) {
+	vector<PartitionStatistics> result;
+	auto &bind = input.bind_data->Cast<PaimonScanBindData>();
+
+	// The current filter pushdown path keeps DuckDB residual filters for correctness.
+	// Only expose exact counts for unfiltered scans, where DuckDB can safely replace
+	// COUNT(*) with a constant.
+	if (bind.predicates != nullptr || !bind.part_filters.empty()) {
+		return result;
+	}
+
+	std::vector<std::shared_ptr<paimon::Split>> splits;
+	try {
+		splits = CreatePaimonScanSplits(bind);
+	} catch (...) {
+		return result;
+	}
+
+	paimon::ReadContextBuilder read_context_builder(bind.table_data_path);
+	auto read_context_result =
+	    read_context_builder.SetOptions(bind.paimon_options).SetTableSchema(bind.table_schema_json).Finish();
+	if (!read_context_result.ok()) {
+		return result;
+	}
+	auto read_context = std::move(read_context_result).value();
+
+	auto table_read_result = paimon::TableRead::Create(std::move(read_context));
+	if (!table_read_result.ok()) {
+		return result;
+	}
+	auto table_read = std::move(table_read_result).value();
+
+	auto count_reader_result = table_read->CreateCountReader(splits);
+	if (!count_reader_result.ok()) {
+		return result;
+	}
+	auto count_reader = std::move(count_reader_result).value();
+
+	auto count_result = count_reader->CountRows();
+	if (!count_result.ok()) {
+		return result;
+	}
+	auto row_count = std::move(count_result).value();
+	if (row_count < 0) {
+		return result;
+	}
+
+	PartitionStatistics stats;
+	stats.count = NumericCast<idx_t>(row_count);
+	stats.count_type = CountType::COUNT_EXACT;
+	result.push_back(std::move(stats));
+	return result;
 }
 
 static unique_ptr<LocalTableFunctionState> PaimonScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -913,6 +971,7 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	fun.init_local = PaimonScanInitLocal;
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
+	fun.get_partition_stats = PaimonGetPartitionStats;
 	function_set.AddFunction(fun);
 
 	auto fun_fullpath = TableFunction({LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
@@ -925,6 +984,7 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	fun_fullpath.init_local = PaimonScanInitLocal;
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;
+	fun_fullpath.get_partition_stats = PaimonGetPartitionStats;
 	function_set.AddFunction(fun_fullpath);
 
 	return function_set;

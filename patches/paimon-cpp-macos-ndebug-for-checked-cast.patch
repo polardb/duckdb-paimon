@@ -1,5 +1,5 @@
 diff --git a/cmake_modules/BuildUtils.cmake b/cmake_modules/BuildUtils.cmake
-index ed27ed7..1a4e79c 100644
+index 30647af..48bd44d 100644
 --- a/cmake_modules/BuildUtils.cmake
 +++ b/cmake_modules/BuildUtils.cmake
 @@ -176,7 +176,13 @@ function(add_paimon_lib LIB_NAME)
@@ -14,6 +14,6 @@ index ed27ed7..1a4e79c 100644
 +            # falls back to static_cast (same as Release mode).
 +            target_compile_definitions(${LIB_NAME}_objlib PRIVATE $<$<CONFIG:Debug>:NDEBUG>)
 +        else()
-             target_link_options(${LIB_NAME}_shared
-                                 PRIVATE
-                                 -Wl,--exclude-libs,ALL
+             set(SHARED_LINK_OPTIONS -Wl,--exclude-libs,ALL -Wl,-Bsymbolic
+                                     -Wl,--gc-sections)
+             # -z defs (--no-undefined) rejects the __asan_*/__ubsan_* symbols that
