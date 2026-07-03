@@ -1,0 +1,20 @@
+{
+    "version": 3,
+    "id": 4,
+    "schemaId": 0,
+    "baseManifestList": "manifest-list-1e68f79f-f004-4a95-9580-ab099f9fd872-0",
+    "baseManifestListSize": 1262,
+    "deltaManifestList": "manifest-list-1e68f79f-f004-4a95-9580-ab099f9fd872-1",
+    "deltaManifestListSize": 1107,
+    "changelogManifestList": null,
+    "indexManifest": "index-manifest-1e68f79f-f004-4a95-9580-ab099f9fd872-0",
+    "commitUser": "duckdb-paimon-scalar-index-fixture",
+    "commitIdentifier": 9223372036854775807,
+    "commitKind": "APPEND",
+    "timeMillis": 1783045365360,
+    "logOffsets": {},
+    "totalRecordCount": 30,
+    "deltaRecordCount": 0,
+    "changelogRecordCount": 0,
+    "nextRowId": 30
+}

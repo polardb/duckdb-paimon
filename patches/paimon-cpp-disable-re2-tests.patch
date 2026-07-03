@@ -1,0 +1,16 @@
+diff --git a/cmake_modules/ThirdpartyToolchain.cmake b/cmake_modules/ThirdpartyToolchain.cmake
+index 10c460a..9d45e64 100644
+--- a/cmake_modules/ThirdpartyToolchain.cmake
++++ b/cmake_modules/ThirdpartyToolchain.cmake
+@@ -1016,7 +1016,10 @@ macro(build_re2)
+     )
+     set(RE2_LIBRARIES ${RE2_STATIC_LIB})
+
+-    set(RE2_CMAKE_ARGS ${EP_COMMON_CMAKE_ARGS} "-DCMAKE_INSTALL_PREFIX=${RE2_PREFIX}")
++    set(RE2_CMAKE_ARGS
++        ${EP_COMMON_CMAKE_ARGS}
++        "-DCMAKE_INSTALL_PREFIX=${RE2_PREFIX}"
++        "-DRE2_BUILD_TESTING=OFF")
+
+     externalproject_add(re2_ep
+                         ${EP_COMMON_OPTIONS}

@@ -38,7 +38,8 @@ file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 set(PAIMON_CPP_PATCHES
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-macos-ndebug-for-checked-cast.patch
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-disable-global-constructors-warning.patch)
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-disable-global-constructors-warning.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-disable-re2-tests.patch)
 
 # Build patch command: apply each patch idempotently
 set(PAIMON_CPP_PATCH_SCRIPT "")
@@ -68,6 +69,8 @@ ExternalProject_Add(paimon_cpp_ep
     -DPAIMON_ENABLE_LUCENE=OFF
   BUILD_BYPRODUCTS
     ${PAIMON_CPP_LIB}/libpaimon${CMAKE_SHARED_LIBRARY_SUFFIX}
+    ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
+    ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
@@ -120,6 +123,8 @@ add_dependencies(${TARGET_NAME}_loadable_extension paimon_cpp_ep)
 set(PAIMON_CPP_LIBS
   ${PAIMON_CPP_LIB}/libpaimon${CMAKE_SHARED_LIBRARY_SUFFIX}
   $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--no-as-needed>
+  ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
@@ -143,6 +148,8 @@ endif()
 # Bundle paimon-cpp runtime dependencies next to paimon.duckdb_extension.
 set(PAIMON_CPP_RUNTIME_BUNDLE_LIBS
   ${PAIMON_CPP_LIB}/libpaimon${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/${JINDOSDK_C_RUNTIME_NAME}
