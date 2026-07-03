@@ -1,0 +1,34 @@
+{
+    "version": 3,
+    "id": 0,
+    "fields": [
+        {
+            "id": 0,
+            "name": "idx",
+            "type": "INT"
+        },
+        {
+            "id": 1,
+            "name": "payload",
+            "type": "STRING"
+        },
+        {
+            "id": 2,
+            "name": "part",
+            "type": "INT"
+        }
+    ],
+    "highestFieldId": 2,
+    "partitionKeys": [
+        "part"
+    ],
+    "primaryKeys": [],
+    "options": {
+        "bucket": "-1",
+        "data-evolution.enabled": "true",
+        "file.format": "parquet",
+        "global-index.enabled": "true",
+        "row-tracking.enabled": "true"
+    },
+    "timeMillis": 1783045011963
+}

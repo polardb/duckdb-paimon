@@ -1,0 +1,19 @@
+{
+    "version": 3,
+    "id": 3,
+    "schemaId": 0,
+    "baseManifestList": "manifest-list-274b9ec5-3939-4872-b886-b4604f03d484-0",
+    "baseManifestListSize": 1225,
+    "deltaManifestList": "manifest-list-274b9ec5-3939-4872-b886-b4604f03d484-1",
+    "deltaManifestListSize": 1193,
+    "changelogManifestList": null,
+    "commitUser": "duckdb",
+    "commitIdentifier": 9223372036854775807,
+    "commitKind": "APPEND",
+    "timeMillis": 1783045012114,
+    "logOffsets": {},
+    "totalRecordCount": 30,
+    "deltaRecordCount": 10,
+    "changelogRecordCount": 0,
+    "nextRowId": 30
+}
