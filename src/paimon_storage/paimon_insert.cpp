@@ -45,11 +45,11 @@
 namespace duckdb {
 
 PhysicalPaimonInsert::PhysicalPaimonInsert(PhysicalPlan &physical_plan, LogicalOperator &op, SchemaCatalogEntry &schema,
-                                           unique_ptr<BoundCreateTableInfo> info, string table_path,
+                                           unique_ptr<BoundCreateTableInfo> info, paimon::Identifier table_identifier,
                                            map<string, string> paimon_options, vector<string> part_keys,
                                            idx_t estimated_cardinality)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, {LogicalType::BIGINT}, estimated_cardinality),
-      schema(&schema), info(std::move(info)), table_path(std::move(table_path)),
+      schema(&schema), info(std::move(info)), table_identifier(std::move(table_identifier)),
       paimon_options(std::move(paimon_options)), part_keys(std::move(part_keys)) {
 }
 
@@ -61,6 +61,7 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 	std::mutex lock;
 	std::atomic<int32_t> next_write_id {0};
 	std::vector<std::shared_ptr<paimon::CommitMessage>> all_commit_messages;
+	string table_path;
 	idx_t insert_count = 0;
 	bool finished = false;
 
@@ -87,18 +88,16 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 		paimon_schema.CreateTable(txn, *info);
 	}
 
+	auto &paimon_catalog = schema->catalog.Cast<PaimonCatalog>();
+	auto &catalog = paimon_catalog.GetPaimonCatalog();
+	auto table_path_result = catalog.GetTableLocation(table_identifier);
+	if (!table_path_result.ok()) {
+		throw IOException(table_path_result.status().ToString());
+	}
+	state->table_path = std::move(table_path_result).value();
+
 	if (!part_keys.empty()) {
-		auto &paimon_catalog = schema->catalog.Cast<PaimonCatalog>();
-		auto &catalog = paimon_catalog.GetPaimonCatalog();
-		auto schema_name = info ? info->Base().schema : schema->name;
-		auto table_name = info ? info->Base().table : string();
-
-		if (table_name.empty()) {
-			auto last_slash = table_path.rfind('/');
-			table_name = (last_slash != string::npos) ? table_path.substr(last_slash + 1) : table_path;
-		}
-
-		auto schema_result = catalog.LoadTableSchema(paimon::Identifier(schema_name, table_name));
+		auto schema_result = catalog.LoadTableSchema(table_identifier);
 		if (!schema_result.ok()) {
 			throw IOException(schema_result.status().ToString());
 		}
@@ -135,7 +134,7 @@ unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionCont
 
 	int32_t write_id = gstate.next_write_id.fetch_add(1);
 
-	paimon::WriteContextBuilder write_builder(table_path, "duckdb");
+	paimon::WriteContextBuilder write_builder(gstate.table_path, "duckdb");
 	auto write_ctx_result = write_builder.WithWriteId(write_id).SetOptions(paimon_options).Finish();
 	if (!write_ctx_result.ok()) {
 		throw IOException(write_ctx_result.status().ToString());
@@ -274,7 +273,7 @@ SinkFinalizeType PhysicalPaimonInsert::Finalize(Pipeline &pipeline, Event &event
 		return SinkFinalizeType::READY;
 	}
 
-	paimon::CommitContextBuilder commit_builder(table_path, "duckdb");
+	paimon::CommitContextBuilder commit_builder(gstate.table_path, "duckdb");
 	auto commit_ctx_result = commit_builder.SetOptions(paimon_options).Finish();
 	if (!commit_ctx_result.ok()) {
 		throw IOException(commit_ctx_result.status().ToString());

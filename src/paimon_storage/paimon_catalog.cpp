@@ -235,7 +235,7 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 	}
 
 	auto &base = op.info->Base();
-	auto table_path = path + "/" + base.schema + paimon::Catalog::DB_SUFFIX + "/" + base.table;
+	paimon::Identifier table_identifier(base.schema, base.table);
 	auto paimon_options = GetPaimonOptions(context, path, attached_options);
 
 	vector<string> part_keys;
@@ -246,7 +246,7 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 		part_keys.push_back(part_expr->Cast<ColumnRefExpression>().GetColumnName());
 	}
 
-	auto &insert = planner.Make<PhysicalPaimonInsert>(op, op.schema, std::move(op.info), std::move(table_path),
+	auto &insert = planner.Make<PhysicalPaimonInsert>(op, op.schema, std::move(op.info), std::move(table_identifier),
 	                                                  std::move(paimon_options), std::move(part_keys), 0U);
 	insert.children.push_back(plan);
 	return insert;
@@ -259,11 +259,11 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 	}
 
 	auto &table = op.table;
-	auto table_path = path + "/" + table.schema.name + paimon::Catalog::DB_SUFFIX + "/" + table.name;
+	paimon::Identifier table_identifier(table.schema.name, table.name);
 	auto paimon_options = GetPaimonOptions(context, path, attached_options);
 
 	vector<string> part_keys;
-	auto schema_result = paimon_catalog->LoadTableSchema(paimon::Identifier(table.schema.name, table.name));
+	auto schema_result = paimon_catalog->LoadTableSchema(table_identifier);
 	if (!schema_result.ok()) {
 		throw IOException(schema_result.status().ToString());
 	}
@@ -277,7 +277,7 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
 
-	auto &insert = planner.Make<PhysicalPaimonInsert>(op, table.schema, nullptr, std::move(table_path),
+	auto &insert = planner.Make<PhysicalPaimonInsert>(op, table.schema, nullptr, std::move(table_identifier),
 	                                                  std::move(paimon_options), std::move(part_keys), 0U);
 	if (plan) {
 		insert.children.push_back(*plan);
