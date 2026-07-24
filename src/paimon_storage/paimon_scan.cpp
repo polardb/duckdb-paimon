@@ -611,7 +611,6 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 
 	auto path = PaimonTablePath::Parse(input.inputs);
 	bind_data->path = path;
-	bind_data->table_data_path = path.warehouse + "/" + path.dbname + paimon::Catalog::DB_SUFFIX + "/" + path.tablename;
 
 	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
 	auto expected_splits = scan_options.find("debug_expected_splits");
@@ -624,8 +623,14 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	}
 	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
 	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, path.warehouse, scan_options);
+	paimon::Identifier table_identifier(path.dbname, path.tablename);
+	auto table_path_result = paimon_catalog->GetTableLocation(table_identifier);
+	if (!table_path_result.ok()) {
+		throw IOException(table_path_result.status().ToString());
+	}
+	bind_data->table_data_path = std::move(table_path_result).value();
 
-	auto table_schema_result = paimon_catalog->LoadTableSchema(paimon::Identifier(path.dbname, path.tablename));
+	auto table_schema_result = paimon_catalog->LoadTableSchema(table_identifier);
 	if (!table_schema_result.ok()) {
 		throw IOException(table_schema_result.status().ToString());
 	}

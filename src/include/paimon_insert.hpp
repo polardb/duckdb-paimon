@@ -26,6 +26,7 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+#include "paimon/catalog/identifier.h"
 
 #include <map>
 #include <string>
@@ -39,12 +40,12 @@ public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::EXTENSION;
 
 	PhysicalPaimonInsert(PhysicalPlan &physical_plan, LogicalOperator &op, SchemaCatalogEntry &schema,
-	                     unique_ptr<BoundCreateTableInfo> info, string table_path, map<string, string> paimon_options,
-	                     vector<string> part_keys, idx_t estimated_cardinality);
+	                     unique_ptr<BoundCreateTableInfo> info, paimon::Identifier table_identifier,
+	                     map<string, string> paimon_options, vector<string> part_keys, idx_t estimated_cardinality);
 
 	SchemaCatalogEntry *schema;
 	unique_ptr<BoundCreateTableInfo> info;
-	string table_path;
+	paimon::Identifier table_identifier;
 	map<string, string> paimon_options;
 	vector<string> part_keys;
 
