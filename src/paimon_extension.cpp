@@ -50,8 +50,12 @@ static unique_ptr<BaseSecret> CreatePaimonSecretFromConfig(ClientContext &contex
 	result->TrySetValue("endpoint", input);
 	result->TrySetValue("key_id", input);
 	result->TrySetValue("secret", input);
+	result->TrySetValue("session_token", input);
+	result->TrySetValue("region", input);
+	result->TrySetValue("profile", input);
+	result->TrySetValue("path_style_access", input);
 
-	result->redact_keys = {"key_id", "secret"};
+	result->redact_keys = {"key_id", "secret", "session_token"};
 
 	return std::move(result);
 }
@@ -68,7 +72,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	secret_fun.named_parameters["endpoint"] = LogicalType::VARCHAR;
 	secret_fun.named_parameters["key_id"] = LogicalType::VARCHAR;
 	secret_fun.named_parameters["secret"] = LogicalType::VARCHAR;
+	secret_fun.named_parameters["session_token"] = LogicalType::VARCHAR;
+	secret_fun.named_parameters["region"] = LogicalType::VARCHAR;
+	secret_fun.named_parameters["path_style_access"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(secret_fun);
+
+	CreateSecretFunction credential_chain_fun = {"paimon", "credential_chain", CreatePaimonSecretFromConfig};
+	credential_chain_fun.named_parameters["endpoint"] = LogicalType::VARCHAR;
+	credential_chain_fun.named_parameters["region"] = LogicalType::VARCHAR;
+	credential_chain_fun.named_parameters["profile"] = LogicalType::VARCHAR;
+	credential_chain_fun.named_parameters["path_style_access"] = LogicalType::BOOLEAN;
+	loader.RegisterFunction(credential_chain_fun);
 
 	for (auto &fun : PaimonFunctions::GetTableFunctions()) {
 		loader.RegisterFunction(fun);

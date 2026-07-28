@@ -51,6 +51,9 @@
 
 namespace duckdb {
 
+static constexpr const char *S3_PATH_PREFIX = "s3://";
+static constexpr const char *OSS_PATH_PREFIX = "oss://";
+
 static std::optional<string> TryGetPaimonOptionValue(const unordered_map<string, Value> &input_options,
                                                      const string &key) {
 	for (const auto &entry : input_options) {
@@ -81,6 +84,23 @@ static string GetValidatedFormatOption(const unordered_map<string, Value> &input
 	return normalized_value;
 }
 
+static void AddOptionalSecretOption(const KeyValueSecret &secret, const string &secret_key, const string &option_key,
+                                    map<string, string> &paimon_options) {
+	Value value;
+	if (secret.TryGetValue(secret_key, value)) {
+		paimon_options[option_key] = value.ToString();
+	}
+}
+
+static void AddRequiredSecretOption(const KeyValueSecret &secret, const string &secret_key, const string &option_key,
+                                    map<string, string> &paimon_options) {
+	Value value;
+	if (!secret.TryGetValue(secret_key, value) || value.ToString().empty()) {
+		throw InvalidInputException("Missing required Paimon secret option \"%s\"", secret_key);
+	}
+	paimon_options[option_key] = value.ToString();
+}
+
 map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, const string &path,
                                                     const unordered_map<string, Value> &input_options) {
 	// Format options are only injected when the user explicitly provides them.
@@ -103,38 +123,54 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 		    GetValidatedFormatOption(input_options, "file_format", "", supported_file_formats);
 	}
 
-	// secret loading
+	auto normalized_path = StringUtil::Lower(path);
+	const bool is_oss = StringUtil::StartsWith(normalized_path, OSS_PATH_PREFIX);
+	const bool is_s3 = StringUtil::StartsWith(normalized_path, S3_PATH_PREFIX);
+
+	if (is_oss) {
+		paimon_options[paimon::Options::FILE_SYSTEM] = "jindo";
+	} else if (is_s3) {
+		paimon_options[paimon::Options::FILE_SYSTEM] = "s3";
+	} else {
+		paimon_options[paimon::Options::FILE_SYSTEM] = "local";
+	}
+
+	// Secret loading
 	auto &secret_manager = SecretManager::Get(context);
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 	auto secret_match = secret_manager.LookupSecret(transaction, path, "paimon");
 
 	if (secret_match.HasMatch()) {
 		const auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*secret_match.secret_entry->secret);
+		const auto &provider = kv_secret.GetProvider();
 
-		auto ak = kv_secret.TryGetValue("key_id").ToString();
-		auto sk = kv_secret.TryGetValue("secret").ToString();
-		auto endpoint = kv_secret.TryGetValue("endpoint").ToString();
-
-		// Extract bucket name from oss://bucketname/... path
-		const string oss_prefix = "oss://";
-		if (path.rfind(oss_prefix, 0) != 0) {
-			throw IOException("Paimon secret found but path is not an OSS path: " + path);
-		}
-		auto bucket_start = oss_prefix.size();
-		auto bucket_end = path.find('/', bucket_start);
-		string bucket =
-		    path.substr(bucket_start, bucket_end == string::npos ? string::npos : bucket_end - bucket_start);
-		if (bucket.empty()) {
-			throw IOException("Invalid OSS path, cannot extract bucket name: " + path);
+		if (provider == "credential_chain" && !is_s3) {
+			throw InvalidInputException("Paimon provider \"%s\" is only supported for S3 paths", provider);
 		}
 
-		paimon_options.insert({paimon::Options::FILE_SYSTEM, "jindo"});
-		paimon_options.insert({"fs.oss.user", "paimon"});
-		paimon_options.insert({"fs.oss.bucket." + bucket + ".accessKeyId", ak});
-		paimon_options.insert({"fs.oss.bucket." + bucket + ".accessKeySecret", sk});
-		paimon_options.insert({"fs.oss.bucket." + bucket + ".endpoint", endpoint});
-	} else {
-		paimon_options.insert({paimon::Options::FILE_SYSTEM, "local"});
+		if (is_oss) {
+			auto bucket_start = string(OSS_PATH_PREFIX).size();
+			auto bucket_end = path.find('/', bucket_start);
+			string bucket =
+			    path.substr(bucket_start, bucket_end == string::npos ? string::npos : bucket_end - bucket_start);
+			if (bucket.empty()) {
+				throw IOException("Invalid OSS path, cannot extract bucket name: " + path);
+			}
+
+			paimon_options["fs.oss.user"] = "paimon";
+			auto bucket_option_prefix = "fs.oss.bucket." + bucket + ".";
+			AddRequiredSecretOption(kv_secret, "key_id", bucket_option_prefix + "accessKeyId", paimon_options);
+			AddRequiredSecretOption(kv_secret, "secret", bucket_option_prefix + "accessKeySecret", paimon_options);
+			AddRequiredSecretOption(kv_secret, "endpoint", bucket_option_prefix + "endpoint", paimon_options);
+		} else if (is_s3) {
+			AddOptionalSecretOption(kv_secret, "key_id", "s3.access-key", paimon_options);
+			AddOptionalSecretOption(kv_secret, "secret", "s3.secret-key", paimon_options);
+			AddOptionalSecretOption(kv_secret, "endpoint", "s3.endpoint", paimon_options);
+			AddOptionalSecretOption(kv_secret, "session_token", "s3.session.token", paimon_options);
+			AddOptionalSecretOption(kv_secret, "profile", "s3.profile", paimon_options);
+			AddOptionalSecretOption(kv_secret, "region", "s3.region", paimon_options);
+			AddOptionalSecretOption(kv_secret, "path_style_access", "s3.path-style-access", paimon_options);
+		}
 	}
 
 	paimon_options.insert({paimon::Options::READ_BATCH_SIZE, std::to_string(STANDARD_VECTOR_SIZE)});
@@ -177,6 +213,11 @@ PaimonCatalog::PaimonCatalog(ClientContext &context, AttachedDatabase &db, const
 unique_ptr<Catalog> PaimonCatalog::Attach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                           AttachedDatabase &db, const string &name, AttachInfo &info,
                                           AttachOptions &options) {
+	auto normalized_path = StringUtil::Lower(info.path);
+	if (StringUtil::StartsWith(normalized_path, S3_PATH_PREFIX) ||
+	    StringUtil::StartsWith(normalized_path, OSS_PATH_PREFIX)) {
+		options.access_mode = AccessMode::READ_ONLY;
+	}
 	if (options.access_mode == AccessMode::READ_ONLY) {
 		db.SetReadOnlyDatabase();
 	}

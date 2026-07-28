@@ -56,12 +56,18 @@ optional_ptr<CatalogEntry> PaimonTableSet::BuildEntry(ClientContext &context, co
 		}
 	}
 	auto table_schema = std::move(table_schema_result).value();
+	if (!table_schema) {
+		throw IOException("Paimon table schema is empty");
+	}
 
 	auto arrow_schema_result = table_schema->GetArrowSchema();
 	if (!arrow_schema_result.ok()) {
 		throw IOException(arrow_schema_result.status().ToString());
 	}
 	auto arrow_raw = std::move(arrow_schema_result).value();
+	if (!arrow_raw) {
+		throw IOException("Paimon Arrow schema is empty");
+	}
 	auto arrow_deleter = [](ArrowSchema *schema) {
 		if (schema && schema->release) {
 			schema->release(schema);
