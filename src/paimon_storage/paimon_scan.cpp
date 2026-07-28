@@ -635,6 +635,9 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		throw IOException(table_schema_result.status().ToString());
 	}
 	auto table_schema = std::move(table_schema_result).value();
+	if (!table_schema) {
+		throw IOException("Paimon table schema is empty");
+	}
 
 	auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(table_schema);
 	if (data_schema) {
@@ -653,6 +656,9 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		throw IOException(arrow_schema_result.status().ToString());
 	}
 	auto arrow_schema = std::move(arrow_schema_result).value();
+	if (!arrow_schema) {
+		throw IOException("Paimon Arrow schema is empty");
+	}
 
 	// return types and cols
 	auto &config = DBConfig::GetConfig(context);

@@ -55,41 +55,6 @@ FROM paimon_scan('oss://...', 'db', 'orders') o
 JOIN read_csv('customers.csv') c ON o.customer_id = c.id;
 ```
 
-## Development Guide
-
-### Building
-
-Clone the repository with submodules:
-
-```shell
-git clone --recurse-submodules https://github.com/polardb/duckdb-paimon.git
-cd duckdb-paimon
-```
-
-`--recurse-submodules` pulls DuckDB and paimon-cpp, which are required to build the extension.
-
-Build in release mode:
-
-```shell
-GEN=ninja make
-```
-
-Or build in debug mode:
-
-```shell
-GEN=ninja make debug
-```
-
-### Running the Tests
-
-```shell
-# Release
-make test
-
-# Debug
-make test_debug
-```
-
 ## Usage
 
 The examples below use sample data bundled in the `data/` directory of this repository. Start the DuckDB shell with the extension pre-loaded:
@@ -98,59 +63,19 @@ The examples below use sample data bundled in the `data/` directory of this repo
 ./build/release/duckdb
 ```
 
-### Query Local Paimon Tables
+### Query Paimon Tables
 
-Pass the table path directly to `paimon_scan`, or use separate warehouse / database / table arguments:
-
-```sql
-SELECT * FROM paimon_scan('./data/testdb.db/testtbl');
-┌─────────┬───────┬───────┬────────┐
-│   f0    │  f1   │  f2   │   f3   │
-│ varchar │ int32 │ int32 │ double │
-├─────────┼───────┼───────┼────────┤
-│ Alice   │     1 │     0 │   11.0 │
-│ Bob     │     1 │     1 │   12.1 │
-│ Cathy   │     1 │     2 │   13.2 │
-│ David   │     2 │     0 │   21.0 │
-│ Eve     │     2 │     1 │   22.1 │
-│ Frank   │     2 │     2 │   23.2 │
-│ Grace   │     3 │     0 │   31.0 │
-│ Henry   │     3 │     1 │   32.1 │
-│ Iris    │     3 │     2 │   33.2 │
-└─────────┴───────┴───────┴────────┘
-
--- SELECT * FROM paimon_scan('./data', 'testdb', 'testtbl');
-```
-
-### Query Remote OSS Paimon Tables
-
-First create a secret to supply OSS credentials, then query using either a full table path or separate warehouse / database / table arguments:
+Attach a Paimon warehouse as a catalog, then query its tables using standard DuckDB SQL. Use `paimon_scan` instead when attaching a whole warehouse is unnecessary. The local path below is only an example:
 
 ```sql
--- Configure OSS credentials
-CREATE SECRET my_oss (
-    TYPE paimon,
-    key_id 'your-access-key-id',
-    secret 'your-access-key-secret',
-    endpoint 'oss-cn-hangzhou.aliyuncs.com'
-);
+-- Attach a warehouse and query its tables.
+ATTACH './data' AS local_paimon (TYPE paimon);
 
-SELECT * FROM paimon_scan('oss://your-bucket/warehouse/your_db.db/your_table');
-SELECT * FROM paimon_scan('oss://your-bucket/warehouse', 'your_db', 'your_table');
-```
+SELECT count(*) FROM local_paimon.testdb.testtbl;
 
-### Attach as Catalog
-
-ATTACH a Paimon warehouse as a catalog to browse and query all databases and tables inside it with standard DuckDB SQL:
-
-```sql
-ATTACH './data' AS my_catalog (TYPE paimon);
-
-SHOW ALL TABLES;
-SELECT * FROM my_catalog.testdb.testtbl;
-
--- For an OSS warehouse:
--- ATTACH 'oss://my-bucket/warehouse' AS my_catalog (TYPE paimon);
+-- Alternatively, scan a single table with paimon_scan.
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl');
+SELECT count(*) FROM paimon_scan('./data', 'testdb', 'testtbl');
 ```
 
 ### Write Data
@@ -198,27 +123,16 @@ ORDER BY snapshot_id;
 │           2 │ APPEND      │ 2026-01-15 10:48:23.509 │                  6 │
 │           3 │ APPEND      │ 2026-01-15 10:48:23.528 │                  9 │
 └─────────────┴─────────────┴─────────────────────────┴────────────────────┘
-
--- SELECT snapshot_id, commit_kind, commit_time, total_record_count
--- FROM paimon_snapshots('oss://your-bucket/warehouse', 'your_db', 'your_table')
--- ORDER BY snapshot_id;
 ```
 
 ### Time Travel Queries
 
 Query a historical version of a table by snapshot ID or by timestamp. Use `paimon_snapshots` first to identify the snapshot you want.
 
-```sql
--- Read from a specific snapshot (6 rows — state after the second append)
-SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=2);
-
--- Read from a point in time (returns the snapshot active at that moment)
-SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_timestamp=TIMESTAMP '2026-01-15 10:48:23.5');
-```
-
-When using an ATTACHed catalog, the same functionality is available via DuckDB's native `AT` clause:
+When using an ATTACHed catalog, use DuckDB's native `AT` clause. For a single table scan, pass the same snapshot option to `paimon_scan`:
 
 ```sql
+-- Query an attached catalog with DuckDB's native AT clause.
 ATTACH './data' AS my_catalog (TYPE paimon);
 
 -- AT (VERSION => snapshot_id)
@@ -226,6 +140,107 @@ SELECT count(*) FROM my_catalog.testdb.testtbl AT (VERSION => 2);
 
 -- AT (TIMESTAMP => point_in_time)
 SELECT count(*) FROM my_catalog.testdb.testtbl AT (TIMESTAMP => TIMESTAMP '2026-01-15 10:48:23.5');
+
+-- Alternatively, scan a single table with paimon_scan.
+-- Read from a specific snapshot (6 rows — state after the second append)
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=2);
+
+-- Read from a point in time (returns the snapshot active at that moment)
+SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_timestamp=TIMESTAMP '2026-01-15 10:48:23.5');
+```
+
+### Query Remote Paimon Tables
+
+Remote object storage catalogs are read-only (currently). Create a scoped Paimon Secret before attaching or scanning a remote table.
+
+#### Alibaba Cloud OSS
+
+```sql
+CREATE SECRET my_oss (
+    TYPE paimon,
+    PROVIDER config,
+    key_id 'your-access-key-id',
+    secret 'your-access-key-secret',
+    endpoint 'oss-cn-hangzhou.aliyuncs.com',
+    scope 'oss://your-bucket/warehouse'
+);
+
+ATTACH 'oss://your-bucket/warehouse' AS oss_paimon (TYPE paimon);
+SELECT count(*) FROM oss_paimon.your_db.your_table;
+
+SELECT count(*) FROM paimon_scan('oss://your-bucket/warehouse/your_db.db/your_table');
+```
+
+#### Amazon S3
+
+Choose one S3 credential provider for a scope. `credential_chain` uses the AWS credential chain, including the selected AWS CLI profile and refreshed SSO credentials when available:
+
+```sql
+CREATE SECRET my_s3 (
+    TYPE paimon,
+    PROVIDER credential_chain,
+    profile 'default',
+    region 'ap-northeast-2',
+    scope 's3://your-bucket/warehouse'
+);
+```
+
+Use `config` to provide static credentials instead:
+
+```sql
+CREATE SECRET my_s3_static (
+    TYPE paimon,
+    PROVIDER config,
+    key_id 'your-access-key-id',
+    secret 'your-secret-access-key',
+    session_token 'optional-session-token',
+    region 'ap-northeast-2',
+    scope 's3://your-bucket/warehouse'
+);
+```
+
+After creating either Secret, attach or scan the warehouse:
+
+```sql
+ATTACH 's3://your-bucket/warehouse' AS s3_paimon (TYPE paimon);
+SELECT count(*) FROM s3_paimon.your_db.your_table;
+
+SELECT count(*) FROM paimon_scan('s3://your-bucket/warehouse/your_db.db/your_table');
+```
+
+## Development Guide
+
+### Building
+
+Clone the repository with submodules:
+
+```shell
+git clone --recurse-submodules https://github.com/polardb/duckdb-paimon.git
+cd duckdb-paimon
+```
+
+`--recurse-submodules` pulls DuckDB and paimon-cpp, which are required to build the extension.
+
+Build in release mode:
+
+```shell
+GEN=ninja make
+```
+
+Or build in debug mode:
+
+```shell
+GEN=ninja make debug
+```
+
+### Running the Tests
+
+```shell
+# Release
+make test
+
+# Debug
+make test_debug
 ```
 
 ## Related Projects
@@ -233,7 +248,6 @@ SELECT count(*) FROM my_catalog.testdb.testtbl AT (TIMESTAMP => TIMESTAMP '2026-
 - **[Apache Paimon](https://paimon.apache.org/)** — Realtime lakehouse format
 - **[paimon-cpp](https://github.com/alibaba/paimon-cpp)** — Native C++ library for Paimon (underlying dependency)
 - **[DuckDB](https://duckdb.org/)** — Embeddable OLAP database
-- **[duckdb-iceberg](https://github.com/duckdb/duckdb_iceberg)** — DuckDB's official Iceberg extension
 
 ## Join the Community
 

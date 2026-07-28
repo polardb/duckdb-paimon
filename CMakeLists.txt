@@ -36,10 +36,7 @@ set(PAIMON_CPP_LIB ${PAIMON_CPP_PREFIX}/lib64)
 file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 
 set(PAIMON_CPP_PATCHES
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-macos-ndebug-for-checked-cast.patch
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-disable-global-constructors-warning.patch
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-disable-re2-tests.patch)
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch)
 
 # Build patch command: apply each patch idempotently
 set(PAIMON_CPP_PATCH_SCRIPT "")
@@ -48,6 +45,21 @@ foreach(patch IN LISTS PAIMON_CPP_PATCHES)
     "git -C ${PAIMON_CPP_SOURCE_DIR} apply --reverse --check ${patch} 2>/dev/null || git -C ${PAIMON_CPP_SOURCE_DIR} apply ${patch} && ")
 endforeach()
 string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")
+
+set(PAIMON_CPP_TOOLCHAIN_ARGS)
+set(PAIMON_CPP_VCPKG_LIBS)
+if(CMAKE_TOOLCHAIN_FILE AND DEFINED VCPKG_TARGET_TRIPLET AND DEFINED VCPKG_INSTALLED_DIR)
+  list(APPEND PAIMON_CPP_TOOLCHAIN_ARGS
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    -DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}
+    -DVCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}
+    -DVCPKG_MANIFEST_MODE=OFF)
+  if(UNIX AND NOT APPLE)
+    find_package(CURL REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    list(APPEND PAIMON_CPP_VCPKG_LIBS CURL::libcurl OpenSSL::SSL OpenSSL::Crypto)
+  endif()
+endif()
 
 ExternalProject_Add(paimon_cpp_ep
   SOURCE_DIR ${PAIMON_CPP_SOURCE_DIR}
@@ -63,16 +75,19 @@ ExternalProject_Add(paimon_cpp_ep
     -DPAIMON_BUILD_SHARED=ON
     -DPAIMON_BUILD_STATIC=OFF
     -DPAIMON_ENABLE_JINDO=ON
+    -DPAIMON_ENABLE_S3=ON
     -DPAIMON_ENABLE_ORC=ON
     -DPAIMON_ENABLE_AVRO=ON
     -DPAIMON_ENABLE_LUMINA=OFF
     -DPAIMON_ENABLE_LUCENE=OFF
+    ${PAIMON_CPP_TOOLCHAIN_ARGS}
   BUILD_BYPRODUCTS
     ${PAIMON_CPP_LIB}/libpaimon${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
+    ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
     ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
@@ -127,11 +142,13 @@ set(PAIMON_CPP_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_blob_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_VCPKG_LIBS}
   $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--as-needed>
 )
 target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
@@ -152,6 +169,7 @@ set(PAIMON_CPP_RUNTIME_BUNDLE_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/${JINDOSDK_C_RUNTIME_NAME}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}

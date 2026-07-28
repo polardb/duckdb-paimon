@@ -1,5 +1,6 @@
 {
         "dependencies": [
+                "curl",
                 "openssl"
         ],
         "vcpkg-configuration": {
@@ -7,6 +8,7 @@
                         "./extension-ci-tools/vcpkg_ports"
                 ],
                 "overlay-triplets": [
+                        "./vcpkg-triplets",
                         "./extension-ci-tools/toolchains"
                 ]
         }
