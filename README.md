@@ -10,7 +10,7 @@ Similar to other extensions, duckdb-paimon brings DuckDB's powerful local analyt
 
 ## Implementation
 
-This extension is built on top of [paimon-cpp](https://github.com/alibaba/paimon-cpp), an open-source C++ library that provides native access to Paimon format data. It is the first library that brings native Paimon read/write capabilities to the C++ ecosystem.
+This extension is built on top of [paimon-cpp](https://github.com/apache/paimon-cpp), an open-source C++ library that provides native access to Paimon format data. It is the first library that brings native Paimon read/write capabilities to the C++ ecosystem.
 
 - **Zero JVM dependency** — No Java runtime required. Pure C++ implementation means minimal memory footprint and instant startup.
 - **Apache Arrow data exchange** — Data flows between paimon-cpp and DuckDB via Apache Arrow, the industry standard for columnar in-memory data, enabling zero-copy transfers with no serialization overhead.
@@ -246,7 +246,7 @@ make test_debug
 ## Related Projects
 
 - **[Apache Paimon](https://paimon.apache.org/)** — Realtime lakehouse format
-- **[paimon-cpp](https://github.com/alibaba/paimon-cpp)** — Native C++ library for Paimon (underlying dependency)
+- **[paimon-cpp](https://github.com/apache/paimon-cpp)** — Native C++ library for Paimon (underlying dependency)
 - **[DuckDB](https://duckdb.org/)** — Embeddable OLAP database
 
 ## Join the Community
