@@ -8,4 +8,4 @@
 	branch = main
 [submodule "third_party/paimon-cpp"]
 	path = third_party/paimon-cpp
-	url = https://github.com/alibaba/paimon-cpp
+	url = https://github.com/apache/paimon-cpp
