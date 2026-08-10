@@ -37,6 +37,7 @@
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 
 #include "paimon/catalog/catalog.h"
+#include "paimon/catalog_options.h"
 #include "paimon/schema/schema.h"
 
 #include "paimon_catalog.hpp"
@@ -110,6 +111,33 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 	static const vector<string> supported_file_formats = {"avro", "blob", "orc", "parquet"};
 
 	map<string, string> paimon_options;
+
+	auto metastore = TryGetPaimonOptionValue(input_options, "metastore");
+	if (metastore.has_value()) {
+		paimon_options[paimon::CatalogOptions::METASTORE] = metastore.value();
+
+		if (StringUtil::CIEquals(metastore.value(), "rest")) {
+			auto uri = TryGetPaimonOptionValue(input_options, "uri");
+			if (!uri.has_value() || uri->empty()) {
+				throw InvalidInputException("URI is required when METASTORE is 'rest'");
+			}
+			paimon_options[paimon::CatalogOptions::URI] = uri.value();
+
+			auto token_provider = TryGetPaimonOptionValue(input_options, "token_provider");
+			if (!token_provider.has_value() || token_provider->empty()) {
+				throw InvalidInputException("TOKEN_PROVIDER is required when METASTORE is 'rest'");
+			}
+			paimon_options[paimon::CatalogOptions::TOKEN_PROVIDER] = token_provider.value();
+
+			auto token = TryGetPaimonOptionValue(input_options, "token");
+			if (StringUtil::CIEquals(token_provider.value(), "bear") && (!token.has_value() || token->empty())) {
+				throw InvalidInputException("TOKEN is required when TOKEN_PROVIDER is 'bear'");
+			}
+			if (token.has_value()) {
+				paimon_options[paimon::CatalogOptions::TOKEN] = token.value();
+			}
+		}
+	}
 
 	auto manifest_fmt = TryGetPaimonOptionValue(input_options, "manifest_format");
 	if (manifest_fmt.has_value()) {
