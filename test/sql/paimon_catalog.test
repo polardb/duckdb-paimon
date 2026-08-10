@@ -24,3 +24,73 @@ SELECT count(*) FROM paimon_lake.avro_manifest.testtbl;
 
 statement ok
 DETACH paimon_lake;
+
+# REST-only options are not validated without METASTORE 'rest'.
+
+statement ok
+ATTACH './data' AS paimon_filesystem (
+    TYPE paimon,
+    URI 'http://127.0.0.1:0',
+    TOKEN_PROVIDER 'bear'
+);
+
+statement ok
+DETACH paimon_filesystem;
+
+# REST catalog ATTACH options are forwarded to paimon-cpp.
+
+statement error
+ATTACH './paimon-rest-option-test' AS rest_catalog (
+    TYPE paimon,
+    READ_ONLY,
+    METASTORE 'rest'
+);
+----
+URI is required when METASTORE is 'rest'
+
+statement error
+ATTACH './paimon-rest-option-test' AS rest_catalog (
+    TYPE paimon,
+    READ_ONLY,
+    METASTORE 'rest',
+    URI 'http://127.0.0.1:0'
+);
+----
+TOKEN_PROVIDER is required when METASTORE is 'rest'
+
+statement error
+ATTACH './paimon-rest-option-test' AS rest_catalog (
+    TYPE paimon,
+    READ_ONLY,
+    METASTORE 'rest',
+    URI 'http://127.0.0.1:0',
+    TOKEN_PROVIDER 'bear'
+);
+----
+TOKEN is required when TOKEN_PROVIDER is 'bear'
+
+statement error
+ATTACH './paimon-rest-option-test' AS rest_catalog (
+    TYPE paimon,
+    READ_ONLY,
+    METASTORE 'rest',
+    URI 'http://127.0.0.1:0',
+    TOKEN_PROVIDER 'bear',
+    TOKEN 'dev-token'
+);
+----
+http GET request failed
+
+# REST catalog identifiers are case-insensitive.
+
+statement error
+ATTACH './paimon-rest-option-test' AS rest_catalog (
+    TYPE paimon,
+    READ_ONLY,
+    METASTORE 'REST',
+    URI 'http://127.0.0.1:0',
+    TOKEN_PROVIDER 'BEAR',
+    TOKEN 'dev-token'
+);
+----
+http GET request failed
