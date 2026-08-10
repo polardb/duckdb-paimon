@@ -63,7 +63,7 @@ The examples below use sample data bundled in the `data/` directory of this repo
 ./build/release/duckdb
 ```
 
-### Query Paimon Tables
+### Query Local Paimon Tables
 
 Attach a Paimon warehouse as a catalog, then query its tables using standard DuckDB SQL. Use `paimon_scan` instead when attaching a whole warehouse is unnecessary. The local path below is only an example:
 
@@ -151,9 +151,13 @@ SELECT count(*) FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_times
 
 ### Query Remote Paimon Tables
 
-Remote object storage catalogs are read-only (currently). Create a scoped Paimon Secret before attaching or scanning a remote table.
+Tables in remote object storage can be queried directly through a filesystem catalog or through a REST catalog.
 
-#### Alibaba Cloud OSS
+#### Through a Filesystem Catalog
+
+Create a scoped Paimon Secret before attaching or scanning a remote table. Remote object storage catalogs are read-only (currently).
+
+##### Alibaba Cloud OSS
 
 ```sql
 CREATE SECRET my_oss (
@@ -171,7 +175,7 @@ SELECT count(*) FROM oss_paimon.your_db.your_table;
 SELECT count(*) FROM paimon_scan('oss://your-bucket/warehouse/your_db.db/your_table');
 ```
 
-#### Amazon S3
+##### Amazon S3
 
 Choose one S3 credential provider for a scope. `credential_chain` uses the AWS credential chain, including the selected AWS CLI profile and refreshed SSO credentials when available:
 
@@ -206,6 +210,22 @@ ATTACH 's3://your-bucket/warehouse' AS s3_paimon (TYPE paimon);
 SELECT count(*) FROM s3_paimon.your_db.your_table;
 
 SELECT count(*) FROM paimon_scan('s3://your-bucket/warehouse/your_db.db/your_table');
+```
+
+#### Through a REST Catalog
+
+Use a REST catalog when Paimon catalog metadata is served through the [Paimon REST Catalog API](https://paimon.apache.org/docs/master/concepts/rest/). The first `ATTACH` argument (`my_warehouse`) is sent to the REST server as its warehouse identifier; set it to the warehouse or instance your server expects. `rest_paimon` is only the local DuckDB catalog name.
+
+```sql
+ATTACH 'my_warehouse' AS rest_paimon (
+    TYPE paimon,
+    METASTORE 'rest',
+    URI 'http://catalog.example:8080',
+    TOKEN_PROVIDER 'bear',
+    TOKEN 'your-access-token'
+);
+
+SELECT count(*) FROM rest_paimon.your_db.your_table;
 ```
 
 ## Development Guide
