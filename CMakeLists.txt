@@ -15,20 +15,6 @@ include_directories(src/include)
 # Import paimon-cpp as a subproject
 include(ExternalProject)
 
-# JindoSDK: the installed filename differs by platform, but we always bundle
-# using the short name that matches the dylib's install_name.
-file(STRINGS third_party/paimon-cpp/third_party/versions.txt
-     _jindosdk_ver REGEX "^PAIMON_JINDOSDK_C_BUILD_VERSION=")
-string(REGEX REPLACE ".*=" "" _jindosdk_ver "${_jindosdk_ver}")
-string(REGEX REPLACE "([0-9]+)\\..*" "\\1" _jindosdk_major "${_jindosdk_ver}")
-if(APPLE)
-  set(JINDOSDK_C_INSTALLED_NAME "libjindosdk_c.${_jindosdk_ver}.dylib")
-  set(JINDOSDK_C_RUNTIME_NAME "libjindosdk_c.${_jindosdk_major}.dylib")
-else()
-  set(JINDOSDK_C_INSTALLED_NAME "libjindosdk_c.so")
-  set(JINDOSDK_C_RUNTIME_NAME "libjindosdk_c.so.${_jindosdk_major}")
-endif()
-
 set(PAIMON_CPP_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/paimon-cpp)
 set(PAIMON_CPP_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/paimon-cpp-install)
 set(PAIMON_CPP_INCLUDE ${PAIMON_CPP_PREFIX}/include)
@@ -74,7 +60,7 @@ ExternalProject_Add(paimon_cpp_ep
     -DPAIMON_BUILD_TESTS=OFF
     -DPAIMON_BUILD_SHARED=ON
     -DPAIMON_BUILD_STATIC=OFF
-    -DPAIMON_ENABLE_JINDO=ON
+    -DPAIMON_ENABLE_JINDO=OFF
     -DPAIMON_ENABLE_OSS=ON
     -DPAIMON_ENABLE_S3=ON
     -DPAIMON_ENABLE_REST=ON
@@ -88,28 +74,13 @@ ExternalProject_Add(paimon_cpp_ep
     ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-    ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-    ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
     ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_blob_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
 )
-
-# On macOS, paimon-cpp installs the JindoSDK dylib with a versioned filename
-# (e.g. libjindosdk_c.6.10.2.dylib) but its install_name uses the short
-# version (libjindosdk_c.6.dylib). Add a post-install step to provide the
-# short-named copy that runtime lookup expects.
-if(APPLE)
-  ExternalProject_Add_Step(paimon_cpp_ep jindosdk_short_name
-    DEPENDEES install
-    BYPRODUCTS ${PAIMON_CPP_LIB}/${JINDOSDK_C_RUNTIME_NAME}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
-      ${PAIMON_CPP_LIB}/${JINDOSDK_C_RUNTIME_NAME})
-endif()
 
 # Extension sources
 set(EXTENSION_SOURCES
@@ -144,10 +115,8 @@ set(PAIMON_CPP_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
@@ -172,10 +141,8 @@ set(PAIMON_CPP_RUNTIME_BUNDLE_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/${JINDOSDK_C_RUNTIME_NAME}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}

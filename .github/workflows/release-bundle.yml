@@ -115,7 +115,6 @@ jobs:
             osx-*)   LIB_EXT="dylib" ;;
           esac
           cp "${EXT_DIR}"/libpaimon*."${LIB_EXT}"* "${STAGE_DIR}/"
-          cp "${EXT_DIR}"/libjindosdk_c*."${LIB_EXT}"* "${STAGE_DIR}/"
 
           cp LICENSE "${STAGE_DIR}/LICENSE"
           cp README.md "${STAGE_DIR}/README.md"
