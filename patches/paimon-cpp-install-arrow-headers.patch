@@ -1,15 +1,9 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -336,6 +336,11 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
-         DESTINATION "include"
-         FILES_MATCHING
-         PATTERN "*.h")
+@@ -363,0 +364,5 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
 +install(DIRECTORY ${ARROW_INCLUDE_DIR}/
 +        DESTINATION "include"
 +        FILES_MATCHING
 +        PATTERN "*.h"
 +        PATTERN "*.hpp")
-
- set(CMAKE_CXX_VISIBILITY_PRESET hidden)
- set(CMAKE_C_VISIBILITY_PRESET hidden)

@@ -54,6 +54,7 @@ static unique_ptr<BaseSecret> CreatePaimonSecretFromConfig(ClientContext &contex
 	result->TrySetValue("region", input);
 	result->TrySetValue("profile", input);
 	result->TrySetValue("path_style_access", input);
+	result->TrySetValue("signature_version", input);
 
 	result->redact_keys = {"key_id", "secret", "session_token"};
 
@@ -75,6 +76,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	secret_fun.named_parameters["session_token"] = LogicalType::VARCHAR;
 	secret_fun.named_parameters["region"] = LogicalType::VARCHAR;
 	secret_fun.named_parameters["path_style_access"] = LogicalType::BOOLEAN;
+	secret_fun.named_parameters["signature_version"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(secret_fun);
 
 	CreateSecretFunction credential_chain_fun = {"paimon", "credential_chain", CreatePaimonSecretFromConfig};
