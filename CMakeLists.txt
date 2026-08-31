@@ -15,6 +15,10 @@ include_directories(src/include)
 # Import paimon-cpp as a subproject
 include(ExternalProject)
 
+option(PAIMON_ENABLE_OSS "Whether to enable the OSS file system" ON)
+option(PAIMON_ENABLE_S3 "Whether to enable the S3 file system" ON)
+option(PAIMON_ENABLE_REST "Whether to enable the REST catalog" ON)
+
 set(PAIMON_CPP_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/paimon-cpp)
 set(PAIMON_CPP_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/paimon-cpp-install)
 set(PAIMON_CPP_INCLUDE ${PAIMON_CPP_PREFIX}/include)
@@ -41,9 +45,14 @@ if(CMAKE_TOOLCHAIN_FILE AND DEFINED VCPKG_TARGET_TRIPLET AND DEFINED VCPKG_INSTA
     -DVCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}
     -DVCPKG_MANIFEST_MODE=OFF)
   if(UNIX AND NOT APPLE)
-    find_package(CURL REQUIRED)
-    find_package(OpenSSL REQUIRED)
-    list(APPEND PAIMON_CPP_VCPKG_LIBS CURL::libcurl OpenSSL::SSL OpenSSL::Crypto)
+    if(PAIMON_ENABLE_OSS OR PAIMON_ENABLE_S3 OR PAIMON_ENABLE_REST)
+      find_package(CURL REQUIRED)
+      list(APPEND PAIMON_CPP_VCPKG_LIBS CURL::libcurl)
+    endif()
+    if(PAIMON_ENABLE_REST)
+      find_package(OpenSSL REQUIRED)
+      list(APPEND PAIMON_CPP_VCPKG_LIBS OpenSSL::SSL OpenSSL::Crypto)
+    endif()
   endif()
 endif()
 
@@ -60,26 +69,23 @@ ExternalProject_Add(paimon_cpp_ep
     -DPAIMON_BUILD_TESTS=OFF
     -DPAIMON_BUILD_SHARED=ON
     -DPAIMON_BUILD_STATIC=OFF
-    -DPAIMON_ENABLE_JINDO=OFF
-    -DPAIMON_ENABLE_OSS=ON
-    -DPAIMON_ENABLE_S3=ON
-    -DPAIMON_ENABLE_REST=ON
     -DPAIMON_ENABLE_ORC=ON
     -DPAIMON_ENABLE_AVRO=ON
-    -DPAIMON_ENABLE_LUMINA=OFF
-    -DPAIMON_ENABLE_LUCENE=OFF
+    -DPAIMON_ENABLE_OSS=${PAIMON_ENABLE_OSS}
+    -DPAIMON_ENABLE_S3=${PAIMON_ENABLE_S3}
+    -DPAIMON_ENABLE_REST=${PAIMON_ENABLE_REST}
     ${PAIMON_CPP_TOOLCHAIN_ARGS}
   BUILD_BYPRODUCTS
     ${PAIMON_CPP_LIB}/libpaimon${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-    ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-    ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_blob_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
+    $<$<BOOL:${PAIMON_ENABLE_OSS}>:${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}>
+    $<$<BOOL:${PAIMON_ENABLE_S3}>:${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}>
 )
 
 # Extension sources
@@ -115,12 +121,12 @@ set(PAIMON_CPP_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_blob_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
+  $<$<BOOL:${PAIMON_ENABLE_OSS}>:${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}>
+  $<$<BOOL:${PAIMON_ENABLE_S3}>:${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}>
   ${PAIMON_CPP_VCPKG_LIBS}
   $<$<NOT:$<PLATFORM_ID:Darwin>>:-Wl,--as-needed>
 )
@@ -141,13 +147,19 @@ set(PAIMON_CPP_RUNTIME_BUNDLE_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_file_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
-  ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_orc_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_avro_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_blob_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
 )
+if(PAIMON_ENABLE_OSS)
+  list(APPEND PAIMON_CPP_RUNTIME_BUNDLE_LIBS
+    ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX})
+endif()
+if(PAIMON_ENABLE_S3)
+  list(APPEND PAIMON_CPP_RUNTIME_BUNDLE_LIBS
+    ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX})
+endif()
 foreach(lib IN LISTS PAIMON_CPP_RUNTIME_BUNDLE_LIBS)
   add_custom_command(
     TARGET ${TARGET_NAME}_loadable_extension
