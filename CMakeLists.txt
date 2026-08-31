@@ -75,6 +75,7 @@ ExternalProject_Add(paimon_cpp_ep
     -DPAIMON_BUILD_SHARED=ON
     -DPAIMON_BUILD_STATIC=OFF
     -DPAIMON_ENABLE_JINDO=ON
+    -DPAIMON_ENABLE_OSS=ON
     -DPAIMON_ENABLE_S3=ON
     -DPAIMON_ENABLE_REST=ON
     -DPAIMON_ENABLE_ORC=ON
@@ -88,6 +89,7 @@ ExternalProject_Add(paimon_cpp_ep
     ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
+    ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
     ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
     ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
@@ -143,6 +145,7 @@ set(PAIMON_CPP_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/${JINDOSDK_C_INSTALLED_NAME}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}
@@ -170,6 +173,7 @@ set(PAIMON_CPP_RUNTIME_BUNDLE_LIBS
   ${PAIMON_CPP_LIB}/libpaimon_global_index${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_local_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_jindo_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
+  ${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_SHARED_LIBRARY_SUFFIX}
   ${PAIMON_CPP_LIB}/${JINDOSDK_C_RUNTIME_NAME}
   ${PAIMON_CPP_LIB}/libpaimon_parquet_file_format${CMAKE_SHARED_LIBRARY_SUFFIX}

@@ -155,7 +155,7 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 	const bool is_s3 = StringUtil::StartsWith(normalized_path, S3_PATH_PREFIX);
 
 	if (is_oss) {
-		paimon_options[paimon::Options::FILE_SYSTEM] = "jindo";
+		paimon_options[paimon::Options::FILE_SYSTEM] = "oss";
 	} else if (is_s3) {
 		paimon_options[paimon::Options::FILE_SYSTEM] = "s3";
 	} else {
@@ -176,19 +176,13 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 		}
 
 		if (is_oss) {
-			auto bucket_start = string(OSS_PATH_PREFIX).size();
-			auto bucket_end = path.find('/', bucket_start);
-			string bucket =
-			    path.substr(bucket_start, bucket_end == string::npos ? string::npos : bucket_end - bucket_start);
-			if (bucket.empty()) {
-				throw IOException("Invalid OSS path, cannot extract bucket name: " + path);
-			}
-
-			paimon_options["fs.oss.user"] = "paimon";
-			auto bucket_option_prefix = "fs.oss.bucket." + bucket + ".";
-			AddRequiredSecretOption(kv_secret, "key_id", bucket_option_prefix + "accessKeyId", paimon_options);
-			AddRequiredSecretOption(kv_secret, "secret", bucket_option_prefix + "accessKeySecret", paimon_options);
-			AddRequiredSecretOption(kv_secret, "endpoint", bucket_option_prefix + "endpoint", paimon_options);
+			AddRequiredSecretOption(kv_secret, "key_id", "fs.oss.accessKeyId", paimon_options);
+			AddRequiredSecretOption(kv_secret, "secret", "fs.oss.accessKeySecret", paimon_options);
+			AddOptionalSecretOption(kv_secret, "session_token", "fs.oss.sessionToken", paimon_options);
+			AddOptionalSecretOption(kv_secret, "region", "fs.oss.region", paimon_options);
+			AddOptionalSecretOption(kv_secret, "endpoint", "fs.oss.endpoint", paimon_options);
+			AddOptionalSecretOption(kv_secret, "path_style_access", "fs.oss.usePathStyle", paimon_options);
+			AddOptionalSecretOption(kv_secret, "signature_version", "fs.oss.signatureVersion", paimon_options);
 		} else if (is_s3) {
 			AddOptionalSecretOption(kv_secret, "key_id", "s3.access-key", paimon_options);
 			AddOptionalSecretOption(kv_secret, "secret", "s3.secret-key", paimon_options);
