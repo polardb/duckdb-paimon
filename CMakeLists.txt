@@ -154,6 +154,14 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_include_directories(${EXTENSION_NAME} SYSTEM PRIVATE ${PAIMON_CPP_INCLUDE})
 target_include_directories(${TARGET_NAME}_loadable_extension SYSTEM PRIVATE ${PAIMON_CPP_INCLUDE})
 
+# Keep the extension's user-facing feature checks aligned with paimon-cpp.
+set(PAIMON_FEATURE_DEFINITIONS
+  PAIMON_ENABLE_OSS=$<BOOL:${PAIMON_ENABLE_OSS}>
+  PAIMON_ENABLE_S3=$<BOOL:${PAIMON_ENABLE_S3}>
+  PAIMON_ENABLE_REST=$<BOOL:${PAIMON_ENABLE_REST}>)
+target_compile_definitions(${EXTENSION_NAME} PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
+target_compile_definitions(${TARGET_NAME}_loadable_extension PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
+
 # Build paimon-cpp before building the extension
 add_dependencies(${EXTENSION_NAME} paimon_cpp_ep)
 add_dependencies(${TARGET_NAME}_loadable_extension paimon_cpp_ep)

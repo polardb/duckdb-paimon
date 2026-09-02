@@ -117,6 +117,10 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 		paimon_options[paimon::CatalogOptions::METASTORE] = metastore.value();
 
 		if (StringUtil::CIEquals(metastore.value(), "rest")) {
+#if !PAIMON_ENABLE_REST
+			throw InvalidInputException(
+			    "Paimon extension was built without REST catalog support; rebuild with -DPAIMON_ENABLE_REST=ON");
+#else
 			auto uri = TryGetPaimonOptionValue(input_options, "uri");
 			if (!uri.has_value() || uri->empty()) {
 				throw InvalidInputException("URI is required when METASTORE is 'rest'");
@@ -136,6 +140,7 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 			if (token.has_value()) {
 				paimon_options[paimon::CatalogOptions::TOKEN] = token.value();
 			}
+#endif
 		}
 	}
 
@@ -156,9 +161,19 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 	const bool is_s3 = StringUtil::StartsWith(normalized_path, S3_PATH_PREFIX);
 
 	if (is_oss) {
+#if !PAIMON_ENABLE_OSS
+		throw InvalidInputException(
+		    "Paimon extension was built without OSS file system support; rebuild with -DPAIMON_ENABLE_OSS=ON");
+#else
 		paimon_options[paimon::Options::FILE_SYSTEM] = "oss";
+#endif
 	} else if (is_s3) {
+#if !PAIMON_ENABLE_S3
+		throw InvalidInputException(
+		    "Paimon extension was built without S3 file system support; rebuild with -DPAIMON_ENABLE_S3=ON");
+#else
 		paimon_options[paimon::Options::FILE_SYSTEM] = "s3";
+#endif
 	} else {
 		paimon_options[paimon::Options::FILE_SYSTEM] = "local";
 	}
