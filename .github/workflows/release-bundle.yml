@@ -28,9 +28,11 @@ jobs:
           - bundle_arch: linux-amd64
             runner: ubuntu-24.04
             manylinux_image: x86_64
+            vcpkg_triplet: x64-linux-release
           - bundle_arch: linux-arm64
             runner: ubuntu-24.04-arm
             manylinux_image: aarch64
+            vcpkg_triplet: arm64-linux-release
           - bundle_arch: osx-arm64
             runner: macos-14
     steps:
@@ -57,6 +59,15 @@ jobs:
           git -C duckdb fetch --force --tags
           git -C duckdb describe --tags --long
 
+      - name: Set up vcpkg (macOS)
+        if: matrix.bundle_arch == 'osx-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 2025.12.12 https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg rev-parse HEAD | grep -qx 84bab45d415d22042bd0b9081aea57f362da3f35
+          ./vcpkg/bootstrap-vcpkg.sh
+
       - name: Build extension (release, Linux)
         if: startsWith(matrix.bundle_arch, 'linux-')
         shell: bash
@@ -74,21 +85,41 @@ jobs:
               umask 022
               cat /etc/os-release
               dnf install -y \
-                libcurl-devel \
+                autoconf \
+                curl \
+                glibc-devel \
+                kernel-devel \
+                kernel-headers \
+                libtool \
                 ninja-build \
-                openssl-devel \
-                perl-IPC-Cmd
+                perl-IPC-Cmd \
+                perl-core \
+                tar \
+                unzip \
+                wget \
+                zip
               git config --global --add safe.directory \"${WORKSPACE}\"
               git config --global --add safe.directory \"${WORKSPACE}/duckdb\"
               git config --global --add safe.directory \"${WORKSPACE}/extension-ci-tools\"
               git config --global --add safe.directory \"${WORKSPACE}/third_party/paimon-cpp\"
-              make -C \"${WORKSPACE}\"
+              git clone --depth 1 --branch 2025.12.12 https://github.com/microsoft/vcpkg.git \"${WORKSPACE}/vcpkg\"
+              git -C \"${WORKSPACE}/vcpkg\" rev-parse HEAD | grep -qx 84bab45d415d22042bd0b9081aea57f362da3f35
+              \"${WORKSPACE}/vcpkg/bootstrap-vcpkg.sh\"
+              VCPKG_TOOLCHAIN_PATH=\"${WORKSPACE}/vcpkg/scripts/buildsystems/vcpkg.cmake\" \
+                VCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
+                VCPKG_HOST_TRIPLET=${{ matrix.vcpkg_triplet }} \
+                VCPKG_OVERLAY_TRIPLETS=\"${WORKSPACE}/vcpkg-triplets\" \
+                make -C \"${WORKSPACE}\"
             "
 
       - name: Build extension (release, non-Linux)
         if: ${{ !startsWith(matrix.bundle_arch, 'linux-') }}
         shell: bash
         run: |
+          export VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          export VCPKG_TARGET_TRIPLET=arm64-osx-release
+          export VCPKG_HOST_TRIPLET=arm64-osx-release
+          export VCPKG_OVERLAY_TRIPLETS="$PWD/vcpkg-triplets"
           if command -v ninja &>/dev/null; then
             GEN=ninja make
           else
@@ -110,12 +141,6 @@ jobs:
           mkdir -p "${STAGE_DIR}"
 
           cp "${EXT_DIR}/paimon.duckdb_extension" "${STAGE_DIR}/"
-          case "${{ matrix.bundle_arch }}" in
-            linux-*) LIB_EXT="so" ;;
-            osx-*)   LIB_EXT="dylib" ;;
-          esac
-          cp "${EXT_DIR}"/libpaimon*."${LIB_EXT}"* "${STAGE_DIR}/"
-
           cp LICENSE "${STAGE_DIR}/LICENSE"
           cp README.md "${STAGE_DIR}/README.md"
 
