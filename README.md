@@ -1,5 +1,7 @@
 # DuckDB Paimon Extension 🦆
 
+[![Paimon downloads last week](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcommunity-extensions.duckdb.org%2Fdownloads-last-week.json&query=%24.paimon&label=downloads%20last%20week&color=blue)](https://duckdb.org/community_extensions/extensions/paimon)
+
 This extension enables [DuckDB](https://duckdb.org/) to read and query [Apache Paimon](https://paimon.apache.org/) format data directly — no ETL pipelines, no Flink/Spark clusters required. Just open a DuckDB shell and run SQL against your Paimon tables.
 
 Similar to other extensions, duckdb-paimon brings DuckDB's powerful local analytics to the Paimon data lake ecosystem.
@@ -15,18 +17,18 @@ This extension is built on top of [paimon-cpp](https://github.com/apache/paimon-
 - **Zero JVM dependency** — No Java runtime required. Pure C++ implementation means minimal memory footprint and instant startup.
 - **Apache Arrow data exchange** — Data flows between paimon-cpp and DuckDB via Apache Arrow, the industry standard for columnar in-memory data, enabling zero-copy transfers with no serialization overhead.
 - **Parallel scan architecture** — Paimon tables are split into independent Splits, and DuckDB's multi-threaded execution engine reads them in parallel to fully utilize multi-core CPUs.
-- **Secure credential management** — OSS credentials are managed through DuckDB's native Secret Manager with scope isolation and automatic key redaction.
+- **Secure credential management** — Object storage credentials are managed through DuckDB's native Secret Manager with scope isolation and automatic key redaction.
 
 ## Features
 
-- Read Paimon table data (local and remote OSS)
+- Read Paimon table data from local filesystems and remote object storage
 - Write Paimon tables (CREATE TABLE AS, INSERT INTO; append-only tables only)
 - DDL support (CREATE/DROP SCHEMA, CREATE/DROP TABLE)
 - Projection pushdown optimization
 - Predicate pushdown optimization
 - Multiple file format support (manifest / data)
-- Catalog ATTACH support
-- DuckDB Secret-based OSS credential management
+- Filesystem and REST catalog ATTACH support
+- DuckDB Secret-based object storage credential management
 - Snapshot history inspection
 - Snapshot-based time travel queries
 
@@ -57,13 +59,18 @@ JOIN read_csv('customers.csv') c ON o.customer_id = c.id;
 
 ## Usage
 
-The examples below use sample data bundled in the `data/` directory of this repository. Start the DuckDB shell with the extension pre-loaded:
+### Install and Load
 
-```shell
-./build/release/duckdb
+Install and load the extension from DuckDB's community repository:
+
+```sql
+INSTALL paimon FROM community;
+LOAD paimon;
 ```
 
 ### Query Local Paimon Tables
+
+The examples in this section use sample data bundled in the `data/` directory of this repository.
 
 Attach a Paimon warehouse as a catalog, then query its tables using standard DuckDB SQL. Use `paimon_scan` instead when attaching a whole warehouse is unnecessary. The local path below is only an example:
 
@@ -253,6 +260,16 @@ Or build in debug mode:
 GEN=ninja make debug
 ```
 
+After building, launch the matching DuckDB shell with the extension pre-loaded:
+
+```shell
+# Release
+./build/release/duckdb
+
+# Debug
+./build/debug/duckdb
+```
+
 ### Running the Tests
 
 ```shell
@@ -262,6 +279,12 @@ make test
 # Debug
 make test_debug
 ```
+
+## Contributors
+
+<a href="https://github.com/polardb/duckdb-paimon/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=polardb/duckdb-paimon" alt="Contributors to duckdb-paimon" />
+</a>
 
 ## Related Projects
 
