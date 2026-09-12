@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "id": 0,
+  "fields": [
+    {
+      "id": 0,
+      "name": "id",
+      "type": "INT"
+    },
+    {
+      "id": 1,
+      "name": "old",
+      "type": "STRING"
+    },
+    {
+      "id": 2,
+      "name": "discard",
+      "type": "BIGINT"
+    }
+  ],
+  "highestFieldId": 2,
+  "partitionKeys": [],
+  "primaryKeys": [],
+  "options": {
+    "bucket": "-1",
+    "file.format": "parquet"
+  },
+  "comment": null,
+  "timeMillis": 1789202749097
+}

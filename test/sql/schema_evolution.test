@@ -1,0 +1,149 @@
+# name: test/sql/schema_evolution.test
+# group: [sql]
+
+require paimon
+
+# Fixtures generated with PyPaimon 2.0.0 and PyArrow 19.0.1 using real schema changes.
+# Same-type reordering must not silently swap values.
+query TT
+SELECT * FROM paimon_scan('./data/schema_evolution.db/same_types');
+----
+two	one
+
+query TT
+SELECT first, second FROM paimon_scan('./data/schema_evolution.db/same_types');
+----
+one	two
+
+query T
+SELECT first FROM paimon_scan('./data/schema_evolution.db/same_types') WHERE second = 'two';
+----
+one
+
+# Mixed-type reordering previously interpreted INT buffers as STRING and crashed.
+query TII
+SELECT * FROM paimon_scan('./data/schema_evolution.db/mixed_types');
+----
+before	1	10
+
+query ITI
+SELECT discard, old, id FROM paimon_scan('./data/schema_evolution.db/mixed_types');
+----
+10	before	1
+
+query T
+SELECT old FROM paimon_scan('./data/schema_evolution.db/mixed_types');
+----
+before
+
+query I
+SELECT discard FROM paimon_scan('./data/schema_evolution.db/mixed_types') WHERE old = 'before' AND id = 1;
+----
+10
+
+query I
+SELECT discard FROM paimon_scan('./data/schema_evolution.db/mixed_types') WHERE old = 'absent';
+----
+
+# Dropping a middle column leaves a gap in stable field IDs.
+query II
+SELECT * FROM paimon_scan('./data/schema_evolution.db/drop_middle');
+----
+1	10
+
+query II
+SELECT discard, id FROM paimon_scan('./data/schema_evolution.db/drop_middle');
+----
+10	1
+
+query I
+SELECT discard FROM paimon_scan('./data/schema_evolution.db/drop_middle') WHERE id = 1;
+----
+10
+
+query I
+SELECT id FROM paimon_scan('./data/schema_evolution.db/drop_middle') WHERE discard = 10;
+----
+1
+
+query I
+SELECT count(*) FROM paimon_scan('./data/schema_evolution.db/drop_middle');
+----
+1
+
+# A renamed and reordered field still reads its original data by stable ID.
+query TII
+SELECT * FROM paimon_scan('./data/schema_evolution.db/renamed');
+----
+before	1	10
+
+query T
+SELECT renamed FROM paimon_scan('./data/schema_evolution.db/renamed') WHERE id = 1;
+----
+before
+
+query I
+SELECT discard FROM paimon_scan('./data/schema_evolution.db/renamed') WHERE renamed = 'before';
+----
+10
+
+# A dropped and re-added name has a new ID: old files must return NULL.
+# The second row was written with the evolved schema.
+query IIT
+SELECT * FROM paimon_scan('./data/schema_evolution.db/readded') ORDER BY id;
+----
+1	10	NULL
+2	20	after
+
+query TI
+SELECT old, id FROM paimon_scan('./data/schema_evolution.db/readded') ORDER BY id;
+----
+NULL	1
+after	2
+
+query I
+SELECT id FROM paimon_scan('./data/schema_evolution.db/readded') WHERE old IS NULL;
+----
+1
+
+query I
+SELECT id FROM paimon_scan('./data/schema_evolution.db/readded') WHERE old = 'after';
+----
+2
+
+query I
+SELECT id FROM paimon_scan('./data/schema_evolution.db/readded') WHERE old = 'before';
+----
+
+# The attached catalog uses the same scan path.
+statement ok
+ATTACH './data' AS pm (TYPE paimon);
+
+query TT
+SELECT * FROM pm.schema_evolution.same_types;
+----
+two	one
+
+query TII
+SELECT * FROM pm.schema_evolution.mixed_types;
+----
+before	1	10
+
+query II
+SELECT * FROM pm.schema_evolution.drop_middle;
+----
+1	10
+
+query TII
+SELECT * FROM pm.schema_evolution.renamed;
+----
+before	1	10
+
+query IIT
+SELECT * FROM pm.schema_evolution.readded ORDER BY id;
+----
+1	10	NULL
+2	20	after
+
+statement ok
+DETACH pm;
