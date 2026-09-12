@@ -67,6 +67,7 @@ public:
 	std::optional<idx_t> debug_expected_splits;
 
 	string table_schema_json;
+	std::vector<std::string> field_names;
 };
 
 static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundComparisonExpression &comp,
@@ -654,6 +655,7 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		throw IOException(json_schema_result.status().ToString());
 	}
 	bind_data->table_schema_json = std::move(json_schema_result).value();
+	bind_data->field_names = table_schema->FieldNames();
 
 	auto arrow_schema_result = table_schema->GetArrowSchema();
 	if (!arrow_schema_result.ok()) {
@@ -729,6 +731,7 @@ public:
 	                     vector<column_t> column_ids)
 	    : global_state(gstate), bind_data(bind_data) {
 		read_column_ids.reserve(column_ids.size());
+		read_field_names.reserve(column_ids.size());
 		auto column_count = bind_data.arrow_table.GetColumns().size();
 		for (auto column_id : column_ids) {
 			if (IsRowIdColumnId(column_id)) {
@@ -739,6 +742,7 @@ public:
 				                            NumericCast<unsigned long long>(column_id));
 			}
 			read_column_ids.push_back(NumericCast<int>(column_id));
+			read_field_names.push_back(bind_data.field_names[column_id]);
 		}
 		NextSplit();
 	}
@@ -774,6 +778,7 @@ public:
 
 private:
 	unique_ptr<paimon::BatchReader> batch_reader;
+	std::vector<std::string> read_field_names;
 	bool exhausted = false;
 	PaimonScanGlobalState &global_state;
 	const PaimonScanBindData &bind_data;
@@ -802,7 +807,7 @@ private:
 		paimon::ReadContextBuilder read_context_builder(global_state.path);
 		auto read_context_result = read_context_builder.SetOptions(bind_data.paimon_options)
 		                               .SetTableSchema(bind_data.table_schema_json)
-		                               .SetReadFieldIds(read_column_ids)
+		                               .SetReadFieldNames(read_field_names)
 		                               .SetPredicate(global_state.paimon_predicates)
 		                               .EnablePredicateFilter(false)
 		                               .Finish();
