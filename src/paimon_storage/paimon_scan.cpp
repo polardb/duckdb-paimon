@@ -233,6 +233,10 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 			}
 
 			auto val = op.children[i]->Cast<BoundConstantExpression>().value;
+			if (val.IsNull()) {
+				// Paimon scan validation rejects NULL literals; keep the residual filter.
+				return nullptr;
+			}
 			auto literal = PaimonTypeUtils::ConvertLiteral(val, paimon_type);
 			if (!literal) {
 				// Same reason as above: best effort pushdown.
