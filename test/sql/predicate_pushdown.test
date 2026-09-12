@@ -120,6 +120,18 @@ David	2
 Eve	2
 Frank	2
 
+# predicate pushdown: IN with NULL and duplicate constants on a nullable column
+query I
+SELECT col_int FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_int IN (1000, 1000, 3000, NULL) ORDER BY col_int;
+----
+1000
+3000
+
+# predicate pushdown: NOT IN with NULL never matches, including NULL input
+query I
+SELECT col_int FROM paimon_scan('./data/testdb.db/type_test_tbl') WHERE col_int NOT IN (1000, 1000, 3000, NULL);
+----
+
 # predicate pushdown: IN combined with AND
 query III
 SELECT f0, f1, f2 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 IN (1, 2) AND f2 = 0;
