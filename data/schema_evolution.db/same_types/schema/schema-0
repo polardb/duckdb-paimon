@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "id": 0,
+  "fields": [
+    {
+      "id": 0,
+      "name": "first",
+      "type": "STRING"
+    },
+    {
+      "id": 1,
+      "name": "second",
+      "type": "STRING"
+    }
+  ],
+  "highestFieldId": 1,
+  "partitionKeys": [],
+  "primaryKeys": [],
+  "options": {
+    "bucket": "-1",
+    "file.format": "parquet"
+  },
+  "comment": null,
+  "timeMillis": 1789202749067
+}
