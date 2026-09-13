@@ -25,6 +25,8 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
+#include "duckdb/function/table/arrow.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "paimon/catalog/catalog.h"
 #include "paimon/catalog/identifier.h"
@@ -35,6 +37,7 @@
 #include "paimon/schema/schema.h"
 #include "paimon/write_context.h"
 
+#include "paimon_bucket_info.hpp"
 #include "paimon_catalog.hpp"
 #include "paimon_insert.hpp"
 #include "paimon_schema_entry.hpp"
@@ -57,6 +60,11 @@ PhysicalPaimonInsert::PhysicalPaimonInsert(PhysicalPlan &physical_plan, LogicalO
 // Sink state
 // ---------------------------------------------------------------------------
 
+struct PaimonBucketWriter {
+	std::mutex lock;
+	std::unique_ptr<paimon::FileStoreWrite> writer;
+};
+
 struct PaimonInsertGlobalState : public GlobalSinkState {
 	std::mutex lock;
 	std::atomic<int32_t> next_write_id {0};
@@ -68,6 +76,8 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 	vector<string> part_key_names;
 	vector<idx_t> part_col_idxs;
 	string null_part_name = "__DEFAULT_PARTITION__";
+	PaimonBucketInfo bucket_info;
+	vector<unique_ptr<PaimonBucketWriter>> bucket_writers;
 };
 
 struct PaimonInsertLocalState : public LocalSinkState {
@@ -96,14 +106,36 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 	}
 	state->table_path = std::move(table_path_result).value();
 
-	if (!part_keys.empty()) {
-		auto schema_result = catalog.LoadTableSchema(table_identifier);
-		if (!schema_result.ok()) {
-			throw IOException(schema_result.status().ToString());
-		}
+	auto schema_result = catalog.LoadTableSchema(table_identifier);
+	if (!schema_result.ok()) {
+		throw IOException(schema_result.status().ToString());
+	}
 
-		auto table_schema = schema_result.value();
-		auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(table_schema);
+	auto table_schema = schema_result.value();
+	auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(table_schema);
+	if (data_schema) {
+		auto arrow_schema_result = table_schema->GetArrowSchema();
+		if (!arrow_schema_result.ok()) {
+			throw IOException(arrow_schema_result.status().ToString());
+		}
+		ArrowSchemaWrapper arrow_schema;
+		arrow_schema.arrow_schema = *arrow_schema_result.value();
+		arrow_schema_result.value()->release = nullptr;
+		ArrowTableSchema arrow_table;
+		ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table, arrow_schema.arrow_schema);
+		state->bucket_info = PaimonBucketInfo::Bind(arrow_table.GetNames(), arrow_table.GetTypes(), part_keys,
+		                                            data_schema->PrimaryKeys(), data_schema->Options());
+		state->bucket_info.CheckWriteSupported();
+		if (state->bucket_info.num_buckets > 0) {
+			auto writer_count =
+			    MinValue<idx_t>(state->bucket_info.num_buckets, TaskScheduler::GetScheduler(context).NumberOfThreads());
+			for (idx_t i = 0; i < writer_count; i++) {
+				state->bucket_writers.push_back(make_uniq<PaimonBucketWriter>());
+			}
+		}
+	}
+
+	if (!part_keys.empty()) {
 		if (!data_schema) {
 			throw IOException("Failed to resolve Paimon data schema for partitioned insert");
 		}
@@ -128,10 +160,8 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 	return std::move(state);
 }
 
-unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionContext &context) const {
-	auto &gstate = sink_state->Cast<PaimonInsertGlobalState>();
-	auto lstate = make_uniq<PaimonInsertLocalState>();
-
+static std::unique_ptr<paimon::FileStoreWrite> CreatePaimonWriter(PaimonInsertGlobalState &gstate,
+                                                                  const map<string, string> &paimon_options) {
 	int32_t write_id = gstate.next_write_id.fetch_add(1);
 
 	paimon::WriteContextBuilder write_builder(gstate.table_path, "duckdb");
@@ -144,13 +174,21 @@ unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionCont
 	if (!writer_result.ok()) {
 		throw IOException(writer_result.status().ToString());
 	}
-	lstate->writer = std::move(writer_result).value();
+	return std::move(writer_result).value();
+}
+
+unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionContext &context) const {
+	auto &gstate = sink_state->Cast<PaimonInsertGlobalState>();
+	auto lstate = make_uniq<PaimonInsertLocalState>();
+	if (gstate.bucket_writers.empty()) {
+		lstate->writer = CreatePaimonWriter(gstate, paimon_options);
+	}
 
 	return std::move(lstate);
 }
 
-static void WriteChunkWithPartition(PaimonInsertLocalState &lstate, DataChunk &chunk, ClientContext &client,
-                                    const std::map<string, string> &partition) {
+static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataChunk &chunk, ClientContext &client,
+                                                                          const std::map<string, string> &partition) {
 	ArrowArrayWrapper arrow_wrapper;
 	auto client_props = client.GetClientProperties();
 	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, client_props, {});
@@ -164,18 +202,36 @@ static void WriteChunkWithPartition(PaimonInsertLocalState &lstate, DataChunk &c
 		throw IOException(batch_result.status().ToString());
 	}
 
-	auto status = lstate.writer->Write(std::move(batch_result).value());
-	if (!status.ok()) {
-		throw IOException(status.ToString());
-	}
+	return std::move(batch_result).value();
 }
 
 SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &gstate = input.global_state.Cast<PaimonInsertGlobalState>();
 	auto &lstate = input.local_state.Cast<PaimonInsertLocalState>();
+	auto write_chunk = [&](DataChunk &data, const std::map<string, string> &partition, int32_t bucket) {
+		auto batch = BuildRecordBatchWithPartition(data, context.client, partition);
+		if (gstate.bucket_writers.empty()) {
+			auto status = lstate.writer->Write(std::move(batch));
+			if (!status.ok()) {
+				throw IOException(status.ToString());
+			}
+			return;
+		}
+		// A fixed bucket must have one writer across all threads: independent writers
+		// could compact the same old files and produce conflicting commit messages.
+		auto &bucket_writer = *gstate.bucket_writers[bucket % gstate.bucket_writers.size()];
+		lock_guard<mutex> guard(bucket_writer.lock);
+		if (!bucket_writer.writer) {
+			bucket_writer.writer = CreatePaimonWriter(gstate, paimon_options);
+		}
+		auto status = bucket_writer.writer->Write(std::move(batch));
+		if (!status.ok()) {
+			throw IOException(status.ToString());
+		}
+	};
 
 	if (gstate.part_col_idxs.empty()) {
-		WriteChunkWithPartition(lstate, chunk, context.client, {});
+		write_chunk(chunk, {}, 0);
 		lstate.local_count += chunk.size();
 		return SinkResultType::NEED_MORE_INPUT;
 	}
@@ -224,7 +280,7 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		sub_chunk.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes());
 		sub_chunk.Slice(chunk, sel, row_indices.size());
 
-		WriteChunkWithPartition(lstate, sub_chunk, context.client, partition);
+		write_chunk(sub_chunk, partition, 0);
 	}
 
 	lstate.local_count += num_rows;
@@ -234,6 +290,11 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 SinkCombineResultType PhysicalPaimonInsert::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {
 	auto &gstate = input.global_state.Cast<PaimonInsertGlobalState>();
 	auto &lstate = input.local_state.Cast<PaimonInsertLocalState>();
+	if (!gstate.bucket_writers.empty()) {
+		lock_guard<mutex> guard(gstate.lock);
+		gstate.insert_count += lstate.local_count;
+		return SinkCombineResultType::FINISHED;
+	}
 
 	if (lstate.local_count == 0) {
 		auto close_status = lstate.writer->Close();
@@ -268,6 +329,23 @@ SinkCombineResultType PhysicalPaimonInsert::Combine(ExecutionContext &context, O
 SinkFinalizeType PhysicalPaimonInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                 OperatorSinkFinalizeInput &input) const {
 	auto &gstate = input.global_state.Cast<PaimonInsertGlobalState>();
+	for (auto &bucket_writer : gstate.bucket_writers) {
+		if (!bucket_writer->writer) {
+			continue;
+		}
+		auto messages = bucket_writer->writer->PrepareCommit();
+		if (!messages.ok()) {
+			throw IOException(messages.status().ToString());
+		}
+		auto close_status = bucket_writer->writer->Close();
+		if (!close_status.ok()) {
+			throw IOException(close_status.ToString());
+		}
+		bucket_writer->writer.reset();
+		for (auto &message : messages.value()) {
+			gstate.all_commit_messages.push_back(std::move(message));
+		}
+	}
 
 	if (gstate.all_commit_messages.empty()) {
 		return SinkFinalizeType::READY;

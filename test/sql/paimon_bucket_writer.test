@@ -1,0 +1,31 @@
+# name: test/sql/paimon_bucket_writer.test
+# group: [sql]
+
+require paimon
+
+statement ok
+SET threads=4;
+
+statement ok
+ATTACH '__TEST_DIR__/bucket_writer' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# Repeated parallel writes must not compact the same old files in separate writers.
+statement ok
+CREATE TEMP TABLE batch_input AS SELECT i::INTEGER AS id, 'p' AS part FROM range(500000) r(i);
+
+statement ok
+CREATE TABLE pm.d.compacted (id INTEGER, part VARCHAR) PARTITIONED BY (part) WITH ('bucket'='1', 'bucket-key'='id', 'compaction.min.file-num'='2', 'target-file-row-num'='100000');
+
+statement ok
+INSERT INTO pm.d.compacted SELECT * FROM batch_input;
+
+statement ok
+INSERT INTO pm.d.compacted SELECT * FROM batch_input;
+
+query II
+SELECT count(*), count(DISTINCT id) FROM pm.d.compacted;
+----
+1000000	500000
