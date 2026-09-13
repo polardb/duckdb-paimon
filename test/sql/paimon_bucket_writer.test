@@ -1,0 +1,42 @@
+# name: test/sql/paimon_bucket_writer.test
+# group: [sql]
+
+require paimon
+
+statement ok
+SET threads=4;
+
+statement ok
+ATTACH '__TEST_DIR__/bucket_writer' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# Repeated parallel writes must not compact the same old files in separate writers.
+statement ok
+CREATE TEMP TABLE batch_input AS SELECT i::INTEGER AS id, 'p' AS part FROM range(500000) r(i);
+
+statement ok
+CREATE TABLE pm.d.compacted (id INTEGER, part VARCHAR);
+
+# DuckDB 1.4 cannot specify partitions or options in CREATE TABLE.
+# Install the fixed-bucket schema fixture while the catalog is detached.
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"},{"id":1,"name":"part","type":"STRING"}],"highestFieldId":1,"partitionKeys":["part"],"primaryKeys":[],"options":{"bucket":"1","bucket-key":"id","compaction.min.file-num":"2","target-file-row-num":"100000"},"timeMillis":0}') TO '__TEST_DIR__/bucket_writer/d.db/compacted/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/bucket_writer' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.compacted SELECT * FROM batch_input;
+
+statement ok
+INSERT INTO pm.d.compacted SELECT * FROM batch_input;
+
+query II
+SELECT count(*), count(DISTINCT id) FROM pm.d.compacted;
+----
+1000000	500000
