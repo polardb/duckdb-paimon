@@ -40,6 +40,7 @@
 #include "paimon/catalog_options.h"
 #include "paimon/schema/schema.h"
 
+#include "paimon_bucket_info.hpp"
 #include "paimon_catalog.hpp"
 #include "paimon_insert.hpp"
 #include "paimon_schema_entry.hpp"
@@ -349,6 +350,9 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 	if (data_schema) {
 		auto &schema_part_keys = data_schema->PartitionKeys();
 		part_keys.assign(schema_part_keys.begin(), schema_part_keys.end());
+		auto bucket_info = PaimonBucketInfo::Bind(table.GetColumns().GetColumnNames(), table.GetTypes(), part_keys,
+		                                          data_schema->PrimaryKeys(), data_schema->Options());
+		bucket_info.CheckWriteSupported();
 	}
 
 	if (plan && !op.column_index_map.empty()) {

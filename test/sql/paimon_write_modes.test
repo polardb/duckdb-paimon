@@ -1,0 +1,164 @@
+# name: test/sql/paimon_write_modes.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# Negative PK modes are valid metadata, but ordinary SQL cannot complete their writes.
+foreach bucket -1 -2
+
+statement ok
+CREATE TABLE pm.d."mode${bucket}" (id INTEGER PRIMARY KEY) WITH ('bucket'='${bucket}');
+
+statement error
+INSERT INTO pm.d."mode${bucket}" SELECT error('input should not run')::INTEGER;
+----
+use a positive bucket count
+
+statement error
+INSERT INTO pm.d."mode${bucket}" SELECT 1 WHERE false;
+----
+use a positive bucket count
+
+statement ok
+COPY (SELECT 1 AS id) TO '__TEST_DIR__/write_modes.csv' (HEADER);
+
+statement error
+COPY pm.d."mode${bucket}" FROM '__TEST_DIR__/write_modes.csv' (HEADER);
+----
+use a positive bucket count
+
+statement ok
+CREATE TABLE pm.d."part${bucket}" (id INTEGER, part VARCHAR, PRIMARY KEY(id, part)) PARTITIONED BY (part) WITH ('bucket'='${bucket}');
+
+statement error
+INSERT INTO pm.d."part${bucket}" VALUES (1, 'p');
+----
+use a positive bucket count
+
+endloop
+
+statement error
+SELECT count(*) FROM pm.d."mode-1";
+----
+do not support pk table bucket=-1 in scan process
+
+query I
+SELECT count(*) FROM pm.d."mode-2";
+----
+0
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/write_modes/d.db/*/snapshot/snapshot-*');
+----
+0
+
+# Omitting bucket uses the same unsupported dynamic primary-key mode.
+statement ok
+CREATE TABLE pm.d.dynamic_default (id INTEGER PRIMARY KEY);
+
+statement error
+INSERT INTO pm.d.dynamic_default VALUES (1);
+----
+dynamic buckets (bucket = -1) is not supported by paimon-cpp
+
+# Invalid bucket options fail before metadata is created.
+foreach bucket 0
+
+statement error
+CREATE TABLE pm.d.invalid_ao (id INTEGER) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' cannot be 0
+
+statement error
+CREATE TABLE pm.d.invalid_pk (id INTEGER PRIMARY KEY) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' cannot be 0
+
+statement error
+CREATE TABLE pm.d.invalid_ctas WITH ('bucket'='${bucket}') AS SELECT 1 AS id WHERE false;
+----
+Paimon 'bucket' cannot be 0
+
+endloop
+
+# Invalid bucket options fail before metadata is created.
+foreach bucket -3
+
+statement error
+CREATE TABLE pm.d.invalid_ao (id INTEGER) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' values below -2 are not supported
+
+statement error
+CREATE TABLE pm.d.invalid_pk (id INTEGER PRIMARY KEY) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' values below -2 are not supported
+
+statement error
+CREATE TABLE pm.d.invalid_ctas WITH ('bucket'='${bucket}') AS SELECT 1 AS id WHERE false;
+----
+Paimon 'bucket' values below -2 are not supported
+
+endloop
+
+# Invalid bucket options fail before metadata is created.
+foreach bucket 2147483648 -2147483649 9223372036854775808
+
+statement error
+CREATE TABLE pm.d.invalid_ao (id INTEGER) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' must fit in a signed 32-bit integer
+
+statement error
+CREATE TABLE pm.d.invalid_pk (id INTEGER PRIMARY KEY) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' must fit in a signed 32-bit integer
+
+statement error
+CREATE TABLE pm.d.invalid_ctas WITH ('bucket'='${bucket}') AS SELECT 1 AS id WHERE false;
+----
+Paimon 'bucket' must fit in a signed 32-bit integer
+
+endloop
+
+# Invalid bucket options fail before metadata is created.
+foreach bucket abc 12x
+
+statement error
+CREATE TABLE pm.d.invalid_ao (id INTEGER) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' must be an integer
+
+statement error
+CREATE TABLE pm.d.invalid_pk (id INTEGER PRIMARY KEY) WITH ('bucket'='${bucket}');
+----
+Paimon 'bucket' must be an integer
+
+statement error
+CREATE TABLE pm.d.invalid_ctas WITH ('bucket'='${bucket}') AS SELECT 1 AS id WHERE false;
+----
+Paimon 'bucket' must be an integer
+
+endloop
+
+# Postponed bucketing is valid for PK metadata only.
+statement error
+CREATE TABLE pm.d.invalid_ao (id INTEGER) WITH ('bucket'='-2');
+----
+Paimon append tables do not support postponed buckets (bucket = -2)
+
+statement error
+CREATE TABLE pm.d.invalid_ctas WITH ('bucket'='-2') AS SELECT 1 AS id WHERE false;
+----
+Paimon append tables do not support postponed buckets (bucket = -2)
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/write_modes/d.db/invalid*/schema/*');
+----
+0
