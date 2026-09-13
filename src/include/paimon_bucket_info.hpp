@@ -17,6 +17,7 @@
 #pragma once
 
 #include "duckdb/common/types.hpp"
+#include "paimon/bucket/bucket_id_calculator.h"
 
 #include <map>
 
@@ -28,9 +29,15 @@ struct PaimonBucketInfo {
 	                             const std::map<string, string> &options);
 
 	void CheckWriteSupported() const;
+	std::unique_ptr<paimon::BucketIdCalculator> CreateCalculator() const;
 
 	bool is_pk_table = false;
+	vector<column_t> primary_key_ids;
 	int32_t num_buckets = -1;
+	string function = "default";
+	vector<column_t> column_ids;
+	vector<string> column_names;
+	vector<LogicalType> column_types;
 };
 
 } // namespace duckdb

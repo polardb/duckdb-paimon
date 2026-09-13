@@ -1,0 +1,234 @@
+# name: test/sql/paimon_bucket_write.test
+# group: [sql]
+
+require paimon
+
+require parquet
+
+statement ok
+ATTACH '__TEST_DIR__/ao_buckets' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# Unaware mode preserves duplicates and NULLs, with and without partitions.
+statement ok
+CREATE TABLE pm.d.unaware AS SELECT * FROM (VALUES (1, 'a'), (1, 'a'), (NULL, NULL)) v(id, part);
+
+query II
+SELECT count(*), count(id) FROM pm.d.unaware;
+----
+3	2
+
+statement ok
+CREATE TABLE pm.d.unaware_part PARTITIONED BY (part) WITH ('bucket'='-1') AS SELECT * FROM pm.d.unaware;
+
+query II
+SELECT count(*), count(id) FROM pm.d.unaware_part;
+----
+3	2
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/ao_buckets/d.db/unaware_part/**/bucket-0/*.parquet');
+----
+2
+
+# Single-bucket writes must also work without a partition.
+statement ok
+CREATE TABLE pm.d.single_bucket (id INTEGER) WITH ('bucket'='1', 'bucket-key'='id');
+
+statement ok
+INSERT INTO pm.d.single_bucket VALUES (1), (1), (NULL);
+
+query II
+SELECT count(*), count(id) FROM pm.d.single_bucket;
+----
+3	2
+
+statement ok
+CREATE TABLE pm.d.single_ctas WITH ('bucket'='1', 'bucket-key'='id') AS SELECT * FROM pm.d.single_bucket;
+
+query I
+SELECT count(*) FROM pm.d.single_ctas;
+----
+3
+
+# Use multiple scan threads to exercise shared bucket ownership.
+statement ok
+SET threads=4;
+
+# MOD uses Java floorMod, including negative values, BIGINT limits and NULL.
+statement ok
+CREATE TABLE pm.d.mod_plain (id BIGINT, val VARCHAR) WITH ('bucket'='10', 'bucket-key'='id', 'bucket-function.type'='mod');
+
+statement ok
+INSERT INTO pm.d.mod_plain VALUES (10, 'ten'), (-1, 'negative'), (50, 'fifty'), (27, 'positive'), (NULL, 'null'), (-9223372036854775808, 'minimum');
+
+query TI
+SELECT val, regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER FROM read_parquet('__TEST_DIR__/ao_buckets/d.db/mod_plain/bucket-*/*.parquet', filename=true) ORDER BY val;
+----
+fifty	0
+minimum	2
+negative	9
+null	0
+positive	7
+ten	0
+
+# Column mapping and omitted nullable bucket keys use the final input values.
+statement ok
+INSERT INTO pm.d.mod_plain (val, id) VALUES ('reordered', -13);
+
+statement ok
+INSERT INTO pm.d.mod_plain (val) VALUES ('omitted');
+
+query TI
+SELECT val, regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER FROM read_parquet('__TEST_DIR__/ao_buckets/d.db/mod_plain/bucket-*/*.parquet', filename=true) WHERE val IN ('reordered', 'omitted') ORDER BY val;
+----
+omitted	0
+reordered	7
+
+# Partitioned CTAS routes by both partition and bucket; custom NULL partition name.
+statement ok
+CREATE TABLE pm.d.mod_part PARTITIONED BY (part) WITH ('bucket'='10', 'bucket-key'='id', 'bucket-function.type'='mod', 'partition.default-name'='missing') AS SELECT *, CASE WHEN id < 0 THEN 'negative' ELSE NULL END AS part FROM pm.d.mod_plain;
+
+query I
+SELECT count(*) FROM pm.d.mod_part;
+----
+8
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/ao_buckets/d.db/mod_part/part=*/bucket-*/*.parquet', filename=true, hive_partitioning=false) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != ((coalesce(id, 0) % 10 + 10) % 10) OR regexp_extract(filename, '/part=([^/]+)/', 1) != CASE WHEN id < 0 THEN 'negative' ELSE 'missing' END;
+----
+0
+
+# COPY FROM shares routing and works after reloading catalog metadata.
+statement ok
+COPY (SELECT -22::BIGINT AS id, 'copied' AS val, 'copy' AS part) TO '__TEST_DIR__/ao_copy.csv' (HEADER);
+
+statement ok
+DETACH pm;
+
+statement ok
+ATTACH '__TEST_DIR__/ao_buckets' AS pm (TYPE paimon);
+
+statement ok
+COPY pm.d.mod_part FROM '__TEST_DIR__/ao_copy.csv' (HEADER);
+
+query IT
+SELECT id, part FROM pm.d.mod_part WHERE val = 'copied';
+----
+-22	copy
+
+query I
+SELECT regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER FROM read_parquet('__TEST_DIR__/ao_buckets/d.db/mod_part/part=copy/bucket-*/*.parquet', filename=true, hive_partitioning=false);
+----
+8
+
+# Hive mixed-key result comes from Java HiveBucketFunction's compatibility test.
+# Physical column order deliberately differs from bucket-key order.
+statement ok
+CREATE TABLE pm.d.hive_bucket (s VARCHAR, amount DECIMAL(10,4), i INTEGER, bytes BLOB) WITH ('bucket'='8', 'bucket-key'='i,s,bytes,amount', 'bucket-function.type'='hive');
+
+statement ok
+INSERT INTO pm.d.hive_bucket VALUES ('hello', 12.3400, 7, '\x01\x02\x03'::BLOB), (NULL, NULL, NULL, NULL);
+
+query II
+SELECT i, regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER FROM read_parquet('__TEST_DIR__/ao_buckets/d.db/hive_bucket/bucket-*/*.parquet', filename=true) ORDER BY i NULLS FIRST;
+----
+NULL	0
+7	1
+
+# Exercise multiple chunks and all partition/bucket groups.
+statement ok
+CREATE TABLE pm.d.parallel_mod PARTITIONED BY (part) WITH ('bucket'='7', 'bucket-key'='id', 'bucket-function.type'='mod') AS SELECT i::INTEGER AS id, (i % 3)::INTEGER AS part FROM range(-50000, 50000) r(i);
+
+query III
+SELECT count(*), min(id), max(id) FROM pm.d.parallel_mod;
+----
+100000	-50000	49999
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/ao_buckets/d.db/parallel_mod/part=*/bucket-*/*.parquet', filename=true, hive_partitioning=false) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != ((id % 7 + 7) % 7) OR regexp_extract(filename, '/part=([^/]+)/', 1)::INTEGER != id % 3;
+----
+0
+
+# Multiple source row groups enable parallel scans. Repeated writes must not
+# compact the same old files independently in different writer threads.
+statement ok
+CREATE TEMP TABLE batch_input AS SELECT i::INTEGER AS id FROM range(500000) r(i);
+
+statement ok
+CREATE TABLE pm.d.compacted (id INTEGER) WITH ('bucket'='1', 'bucket-key'='id', 'compaction.min.file-num'='2', 'target-file-row-num'='100000');
+
+statement ok
+INSERT INTO pm.d.compacted SELECT * FROM batch_input;
+
+statement ok
+INSERT INTO pm.d.compacted SELECT * FROM batch_input;
+
+query II
+SELECT count(*), count(DISTINCT id) FROM pm.d.compacted;
+----
+1000000	500000
+
+statement error
+CREATE TABLE pm.d.missing_key (id INTEGER) WITH ('bucket'='4');
+----
+fixed-bucket append tables require 'bucket-key'
+
+statement error
+CREATE TABLE pm.d.unaware_key (id INTEGER) WITH ('bucket'='-1', 'bucket-key'='id');
+----
+bucket = -1 cannot specify 'bucket-key'
+
+statement error
+CREATE TABLE pm.d.unknown_key (id INTEGER) WITH ('bucket'='2', 'bucket-key'='absent');
+----
+bucket key 'absent' not found
+
+statement error
+CREATE TABLE pm.d.partition_key (id INTEGER) PARTITIONED BY (id) WITH ('bucket'='2', 'bucket-key'='id');
+----
+bucket key 'id' cannot be a partition key
+
+statement error
+CREATE TABLE pm.d.unknown_function (id INTEGER) WITH ('bucket'='2', 'bucket-key'='id', 'bucket-function.type'='unknown');
+----
+Unsupported Paimon bucket-function.type
+
+statement error
+CREATE TABLE pm.d.mod_keys (id INTEGER, val INTEGER) WITH ('bucket'='2', 'bucket-key'='id,val', 'bucket-function.type'='mod');
+----
+mod bucketing requires exactly one INTEGER or BIGINT bucket key
+
+statement error
+CREATE TABLE pm.d.mod_type (id VARCHAR) WITH ('bucket'='2', 'bucket-key'='id', 'bucket-function.type'='mod');
+----
+ModBucketFunction only supports INT or BIGINT
+
+statement error
+CREATE TABLE pm.d.hive_type (id TIMESTAMP) WITH ('bucket'='2', 'bucket-key'='id', 'bucket-function.type'='hive');
+----
+Unsupported type as Hive bucket key type
+
+statement error
+CREATE TABLE pm.d.default_type (id TIME) WITH ('bucket'='2', 'bucket-key'='id');
+----
+Paimon default bucketing does not support bucket key type
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name='pm' AND table_name IN ('missing_key', 'unaware_key', 'unknown_key', 'partition_key', 'unknown_function', 'mod_keys', 'mod_type', 'hive_type', 'default_type');
+----
+0
+
+# Modulo bucketing also supports a single bucket.
+statement ok
+CREATE TABLE pm.d.mod_single (id INTEGER) WITH ('bucket'='1', 'bucket-key'='id', 'bucket-function.type'='mod');
+
+statement ok
+INSERT INTO pm.d.mod_single VALUES (1);
+
+query I
+SELECT count(*) FROM pm.d.mod_single;
+----
+1
