@@ -139,6 +139,7 @@ set(EXTENSION_SOURCES
   src/paimon_storage/paimon_scan.cpp
   src/paimon_storage/paimon_snapshots.cpp
   src/paimon_storage/paimon_catalog.cpp
+  src/paimon_storage/paimon_bucket_info.cpp
   src/paimon_storage/paimon_insert.cpp
   src/paimon_storage/paimon_schema_entry.cpp
   src/paimon_storage/paimon_schema_set.cpp

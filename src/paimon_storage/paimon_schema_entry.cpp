@@ -34,6 +34,7 @@
 
 #include "paimon/catalog/identifier.h"
 
+#include "paimon_bucket_info.hpp"
 #include "paimon_catalog.hpp"
 #include "paimon_schema_entry.hpp"
 #include "paimon_table_set.hpp"
@@ -152,6 +153,8 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 			throw InvalidInputException("Paimon table option '%s' must be a literal value", opt.first);
 		}
 	}
+
+	PaimonBucketInfo::Bind(col_names, col_types, partition_keys, primary_keys, paimon_options);
 
 	bool ignore_if_exists = base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT;
 	auto status = paimon_catalog.CreateTable(identifier, &arrow_schema, partition_keys, primary_keys, paimon_options,
