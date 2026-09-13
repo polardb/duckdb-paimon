@@ -353,6 +353,15 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 		auto bucket_info = PaimonBucketInfo::Bind(table.GetColumns().GetColumnNames(), table.GetTypes(), part_keys,
 		                                          data_schema->PrimaryKeys(), data_schema->Options());
 		bucket_info.CheckWriteSupported();
+		if (bucket_info.is_pk_table) {
+			if (op.on_conflict_info.action_type != OnConflictAction::THROW) {
+				throw NotImplementedException("ON CONFLICT is not supported for Paimon primary-key tables; "
+				                              "plain INSERT uses the table's merge engine");
+			}
+			if (op.return_chunk) {
+				throw NotImplementedException("INSERT RETURNING is not supported for Paimon primary-key tables");
+			}
+		}
 	}
 
 	if (plan && !op.column_index_map.empty()) {

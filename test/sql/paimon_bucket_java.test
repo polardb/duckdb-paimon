@@ -1,0 +1,118 @@
+# name: test/sql/paimon_bucket_java.test
+# group: [sql]
+
+require paimon
+
+require parquet
+
+# The first eight Java-generated rows from paimon-cpp's
+# test/test_data/record_with_null_for_bucket_id.data, including expected bucket ids.
+# Covers composite keys, NULLs, negative numbers, decimals, timestamps and binary data.
+# Parse floating point values from strings to match Arrow JSON rounding, avoiding DECIMAL casts.
+statement ok
+CREATE TEMP TABLE expected (
+    v0 BOOLEAN, v1 TINYINT, v2 SMALLINT, v3 INTEGER, v4 BIGINT,
+    v5 FLOAT, v6 DOUBLE, v7 DATE, v8 TIMESTAMP_NS,
+    v9 DECIMAL(5,2), v10 DECIMAL(30,2), v11 VARCHAR, v12 BLOB,
+    expected_bucket INTEGER
+);
+
+statement ok
+INSERT INTO expected VALUES
+    (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 10663),
+    (NULL, 15, NULL, 1580443894, -5438565800896958689, '0.54673976'::FLOAT, '0.9644868606768501'::DOUBLE, DATE '1970-01-01' + (369095)::INTEGER, NULL, '34.95', '-3121800083643799333438540749.27', 'Alice_-4126310024944755050', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference -2228689144322150137.', 9184),
+    (FALSE, -99, -25920, NULL, 1532230816302433446, '0.30687112'::FLOAT, '0.6710762488101574'::DOUBLE, DATE '1970-01-01' + (656823)::INTEGER, make_timestamp_ns(1988388716000000), '36.19', '3318076650490463209017982309.32', 'Alice_1318911071456810350', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference -3370274031255729188.', 6580),
+    (NULL, NULL, -32666, 873612482, 1527139015851636296, NULL, '0.25175545768906105'::DOUBLE, NULL, NULL, '23.76', '3829110624120332494774772650.63', NULL, 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference -2476551425607728309.', 155),
+    (TRUE, -118, NULL, 731396580, NULL, '0.19061679'::FLOAT, '0.9043197434746348'::DOUBLE, DATE '1970-01-01' + (-435488)::INTEGER, NULL, '-28.89', '4786545537260784001844944973.28', 'Alice_1773398468402013874', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference -2697084138585034005.', 7665),
+    (NULL, NULL, -26856, 2077347671, -517428980255835422, '0.34984356'::FLOAT, NULL, NULL, make_timestamp_ns(-1550311379000000), '28.79', '-2358082207482465378166386831.59', 'Alice_-4749572426538882759', NULL, 8830),
+    (FALSE, 39, 32700, -348690342, NULL, NULL, NULL, DATE '1970-01-01' + (-374250)::INTEGER, make_timestamp_ns(-1948015872000000), NULL, NULL, 'Alice_-417301880149921110', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference -1365639961131482115.', 3607),
+    (NULL, -60, 20953, -185358571, NULL, NULL, '0.7400275857342519'::DOUBLE, DATE '1970-01-01' + (181758)::INTEGER, make_timestamp_ns(1670927751000000), '6.48', '156960967219241110072414386.29', 'Alice_3087783559322503069', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference 6982618520329021882.', 7262);
+
+statement ok
+ATTACH '__TEST_DIR__/java_buckets' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# Bucket-key order is independent of the physical table column order.
+statement ok
+CREATE TABLE pm.d.plain WITH ('bucket'='12345', 'bucket-key'='v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12') AS SELECT expected_bucket, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0 FROM expected;
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/java_buckets/d.db/plain/bucket-*/*.parquet', filename=true) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != expected_bucket;
+----
+0
+
+query I
+SELECT count(*) FROM pm.d.plain;
+----
+8
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected) EXCEPT ALL (SELECT v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12, expected_bucket FROM pm.d.plain));
+----
+0
+
+statement ok
+CREATE TABLE pm.d.partitioned PARTITIONED BY (part) WITH ('bucket'='12345', 'bucket-key'='v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12') AS SELECT *, CASE WHEN expected_bucket % 2 = 0 THEN 'even' ELSE NULL END AS part FROM expected WHERE false;
+
+statement ok
+INSERT INTO pm.d.partitioned BY NAME SELECT CASE WHEN expected_bucket % 2 = 0 THEN 'even' ELSE NULL END AS part, expected_bucket, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0 FROM expected;
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/java_buckets/d.db/partitioned/part=*/bucket-*/*.parquet', filename=true, hive_partitioning=false) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != expected_bucket;
+----
+0
+
+query I
+SELECT count(*) FROM pm.d.partitioned;
+----
+8
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected) EXCEPT ALL (SELECT v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12, expected_bucket FROM pm.d.partitioned));
+----
+0
+
+# Non-NULL Java fixtures from record_for_bucket_id.data verify implicit PK ordering.
+statement ok
+CREATE TEMP TABLE pk_expected (
+    v0 BOOLEAN, v1 TINYINT, v2 SMALLINT, v3 INTEGER, v4 BIGINT,
+    v5 FLOAT, v6 DOUBLE, v7 DATE, v8 TIMESTAMP_NS,
+    v9 DECIMAL(30,20), v10 VARCHAR, v11 BLOB, expected_bucket INTEGER
+);
+
+statement ok
+INSERT INTO pk_expected VALUES
+    (TRUE, -10, -4038, -1930858313, 2158390814503909950, '0.7815346'::FLOAT, '0.3332183994766498'::DOUBLE, DATE '1970-01-01' + (198467)::INTEGER, make_timestamp_ns(-1661998771000000), '548675771.00000000000000000000', 'Alice_-279624296851435688', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference -3109364765729502342.', 4561),
+    (FALSE, 15, -28048, 553609048, 6787954838522539928, '0.70517474'::FLOAT, '0.023238122483889456'::DOUBLE, DATE '1970-01-01' + (-436312)::INTEGER, make_timestamp_ns(39620447000000), '135992033.00000000000000000000', 'Alice_-655101936082782086', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference 425784808157066482.', 2804),
+    (FALSE, -101, 17098, -960731419, -429849028627267071, '0.6882345'::FLOAT, '0.4872328470301428'::DOUBLE, DATE '1970-01-01' + (-531620)::INTEGER, make_timestamp_ns(-81839914000000), '199671578.00000000000000000000', 'Alice_-4922475540349336432', 'Two roads diverged in a wood, and I took the one less traveled by, And that has made all the difference 4664870386390374308.', 10982);
+
+statement ok
+CREATE TABLE pm.d.pk_default (
+    part VARCHAR, expected_bucket INTEGER, v11 BLOB, v10 VARCHAR, v9 DECIMAL(30,20),
+    v8 TIMESTAMP_NS, v7 DATE, v6 DOUBLE, v5 FLOAT, v4 BIGINT, v3 INTEGER,
+    v2 SMALLINT, v1 TINYINT, v0 BOOLEAN,
+    PRIMARY KEY (v0,part,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11)
+) PARTITIONED BY (part) WITH ('bucket'='12345');
+
+statement ok
+INSERT INTO pm.d.pk_default BY NAME SELECT *, 'p' AS part FROM pk_expected;
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/java_buckets/d.db/pk_default/part=*/bucket-*/*.parquet', filename=true, hive_partitioning=false) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != expected_bucket;
+----
+0
+
+query I
+SELECT count(*) FROM pm.d.pk_default;
+----
+3
+
+statement ok
+INSERT INTO pm.d.pk_default BY NAME SELECT *, 'p' AS part FROM pk_expected;
+
+query I
+SELECT count(*) FROM pm.d.pk_default;
+----
+3
