@@ -1,0 +1,195 @@
+# name: test/sql/paimon_write_modes.test
+# group: [sql]
+
+require paimon
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# DuckDB 1.4 cannot specify table options in CREATE TABLE.
+# Create directories through DDL, then install schema fixtures while detached.
+statement ok
+CREATE TABLE pm.d.mode (id INTEGER PRIMARY KEY);
+
+statement ok
+CREATE TABLE pm.d.partitioned (id INTEGER, part VARCHAR, PRIMARY KEY(id, part));
+
+statement ok
+CREATE TABLE pm.d.ao (id INTEGER);
+
+# Omitting bucket still creates a valid dynamic PK table, but writing fails early.
+statement error
+INSERT INTO pm.d.mode SELECT error('input should not run')::INTEGER;
+----
+use a positive bucket count
+
+statement ok
+COPY (SELECT 1 AS id) TO '__TEST_DIR__/write_modes.csv' (HEADER);
+
+foreach bucket -1 -2
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/mode/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"part","type":"STRING NOT NULL"}],"highestFieldId":1,"partitionKeys":["part"],"primaryKeys":["id","part"],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/partitioned/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.mode SELECT error('input should not run')::INTEGER;
+----
+use a positive bucket count
+
+statement error
+INSERT INTO pm.d.mode SELECT 1 WHERE false;
+----
+use a positive bucket count
+
+statement error
+COPY pm.d.mode FROM '__TEST_DIR__/write_modes.csv' (HEADER);
+----
+use a positive bucket count
+
+statement error
+INSERT INTO pm.d.partitioned VALUES (1, 'p');
+----
+use a positive bucket count
+
+endloop
+
+query I
+SELECT count(*) FROM pm.d.mode;
+----
+0
+
+foreach bucket 0
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/mode/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":[],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/ao/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.mode SELECT 1 WHERE false;
+----
+Paimon 'bucket' cannot be 0
+
+statement error
+INSERT INTO pm.d.ao SELECT 1 WHERE false;
+----
+Paimon 'bucket' cannot be 0
+
+endloop
+
+foreach bucket -3
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/mode/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":[],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/ao/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.mode SELECT 1 WHERE false;
+----
+Paimon 'bucket' values below -2 are not supported
+
+statement error
+INSERT INTO pm.d.ao SELECT 1 WHERE false;
+----
+Paimon 'bucket' values below -2 are not supported
+
+endloop
+
+# Malformed counts in existing metadata are rejected by paimon-cpp while loading the table.
+foreach bucket 2147483648 -2147483649 9223372036854775808
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/mode/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":[],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/ao/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.mode SELECT 1 WHERE false;
+----
+<REGEX>:.*convert key bucket, value .* to int failed.*
+
+statement error
+INSERT INTO pm.d.ao SELECT 1 WHERE false;
+----
+<REGEX>:.*convert key bucket, value .* to int failed.*
+
+endloop
+
+foreach bucket abc 12x
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/mode/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":[],"options":{"bucket":"${bucket}"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/ao/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.mode SELECT 1 WHERE false;
+----
+<REGEX>:.*convert key bucket, value .* to int failed.*
+
+statement error
+INSERT INTO pm.d.ao SELECT 1 WHERE false;
+----
+<REGEX>:.*convert key bucket, value .* to int failed.*
+
+endloop
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":[],"options":{"bucket":"-2"},"timeMillis":0}') TO '__TEST_DIR__/write_modes/d.db/ao/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/write_modes' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.ao VALUES (1);
+----
+Paimon append tables do not support postponed buckets (bucket = -2)
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/write_modes/d.db/*/snapshot/snapshot-*');
+----
+0
