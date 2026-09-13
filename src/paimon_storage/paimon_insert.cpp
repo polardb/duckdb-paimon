@@ -28,6 +28,7 @@
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include "paimon/catalog/catalog.h"
 #include "paimon/catalog/identifier.h"
@@ -71,6 +72,7 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 	std::atomic<int32_t> next_write_id {0};
 	std::vector<std::shared_ptr<paimon::CommitMessage>> all_commit_messages;
 	string table_path;
+	string temp_directory;
 	idx_t insert_count = 0;
 	bool finished = false;
 
@@ -83,6 +85,7 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 
 struct PaimonInsertLocalState : public LocalSinkState {
 	std::unique_ptr<paimon::FileStoreWrite> writer;
+	std::unique_ptr<paimon::BucketIdCalculator> bucket_calculator;
 	idx_t local_count = 0;
 };
 
@@ -128,6 +131,9 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 		state->bucket_info = PaimonBucketInfo::Bind(arrow_table.GetNames(), arrow_table.GetTypes(), part_keys,
 		                                            data_schema->PrimaryKeys(), data_schema->Options());
 		state->bucket_info.CheckWriteSupported();
+		if (state->bucket_info.is_pk_table) {
+			state->temp_directory = BufferManager::GetBufferManager(context).GetTemporaryDirectory();
+		}
 		if (state->bucket_info.num_buckets > 0) {
 			auto writer_count =
 			    MinValue<idx_t>(state->bucket_info.num_buckets, TaskScheduler::GetScheduler(context).NumberOfThreads());
@@ -167,7 +173,10 @@ static std::unique_ptr<paimon::FileStoreWrite> CreatePaimonWriter(PaimonInsertGl
 	int32_t write_id = gstate.next_write_id.fetch_add(1);
 
 	paimon::WriteContextBuilder write_builder(gstate.table_path, "duckdb");
-	auto write_ctx_result = write_builder.WithWriteId(write_id).SetOptions(paimon_options).Finish();
+	auto write_ctx_result = write_builder.WithWriteId(write_id)
+	                            .WithTempDirectory(gstate.temp_directory)
+	                            .SetOptions(paimon_options)
+	                            .Finish();
 	if (!write_ctx_result.ok()) {
 		throw IOException(write_ctx_result.status().ToString());
 	}
@@ -182,6 +191,9 @@ static std::unique_ptr<paimon::FileStoreWrite> CreatePaimonWriter(PaimonInsertGl
 unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionContext &context) const {
 	auto &gstate = sink_state->Cast<PaimonInsertGlobalState>();
 	auto lstate = make_uniq<PaimonInsertLocalState>();
+	if (gstate.bucket_info.num_buckets > 1) {
+		lstate->bucket_calculator = gstate.bucket_info.CreateCalculator();
+	}
 	if (gstate.bucket_writers.empty()) {
 		lstate->writer = CreatePaimonWriter(gstate, paimon_options);
 	}
@@ -190,15 +202,17 @@ unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionCont
 }
 
 static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataChunk &chunk, ClientContext &client,
-                                                                          const std::map<string, string> &partition) {
+                                                                          const std::map<string, string> &partition,
+                                                                          int32_t bucket) {
 	ArrowArrayWrapper arrow_wrapper;
 	auto client_props = client.GetClientProperties();
 	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, client_props, {});
 
 	paimon::RecordBatchBuilder batch_builder(&arrow_wrapper.arrow_array);
 	if (!partition.empty()) {
-		batch_builder.SetPartition(partition).SetBucket(0);
+		batch_builder.SetPartition(partition);
 	}
+	batch_builder.SetBucket(bucket);
 	auto batch_result = batch_builder.Finish();
 	if (!batch_result.ok()) {
 		throw IOException(batch_result.status().ToString());
@@ -210,8 +224,17 @@ static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataCh
 SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &gstate = input.global_state.Cast<PaimonInsertGlobalState>();
 	auto &lstate = input.local_state.Cast<PaimonInsertLocalState>();
+	for (auto column : gstate.bucket_info.primary_key_ids) {
+		UnifiedVectorFormat format;
+		chunk.data[column].ToUnifiedFormat(chunk.size(), format);
+		for (idx_t row = 0; row < chunk.size(); row++) {
+			if (!format.validity.RowIsValid(format.sel->get_index(row))) {
+				throw ConstraintException("Paimon primary-key columns cannot contain NULL");
+			}
+		}
+	}
 	auto write_chunk = [&](DataChunk &data, const std::map<string, string> &partition, int32_t bucket) {
-		auto batch = BuildRecordBatchWithPartition(data, context.client, partition);
+		auto batch = BuildRecordBatchWithPartition(data, context.client, partition, bucket);
 		if (gstate.bucket_writers.empty()) {
 			auto status = lstate.writer->Write(std::move(batch));
 			if (!status.ok()) {
@@ -232,13 +255,31 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		}
 	};
 
-	if (gstate.part_col_idxs.empty()) {
+	if (gstate.part_col_idxs.empty() && gstate.bucket_info.num_buckets <= 1) {
 		write_chunk(chunk, {}, 0);
 		lstate.local_count += chunk.size();
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
 	auto num_rows = chunk.size();
+	vector<int32_t> bucket_ids(num_rows, 0);
+	if (gstate.bucket_info.num_buckets > 1) {
+		auto &bucket_info = gstate.bucket_info;
+		DataChunk bucket_keys;
+		bucket_keys.Initialize(Allocator::DefaultAllocator(), bucket_info.column_types);
+		bucket_keys.ReferenceColumns(chunk, bucket_info.column_ids);
+		ArrowArrayWrapper bucket_array;
+		ArrowSchemaWrapper bucket_schema;
+		auto client_props = context.client.GetClientProperties();
+		ArrowConverter::ToArrowArray(bucket_keys, &bucket_array.arrow_array, client_props, {});
+		ArrowConverter::ToArrowSchema(&bucket_schema.arrow_schema, bucket_info.column_types, bucket_info.column_names,
+		                              client_props);
+		auto status = lstate.bucket_calculator->CalculateBucketIds(&bucket_array.arrow_array,
+		                                                           &bucket_schema.arrow_schema, bucket_ids.data());
+		if (!status.ok()) {
+			throw IOException(status.ToString());
+		}
+	}
 	auto &part_idxs = gstate.part_col_idxs;
 	auto &part_names = gstate.part_key_names;
 	D_ASSERT(part_idxs.size() == part_names.size());
@@ -248,7 +289,7 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		chunk.data[part_idxs[i]].ToUnifiedFormat(num_rows, part_formats[i]);
 	}
 
-	std::map<std::vector<string>, vector<idx_t>> partition_groups;
+	std::map<std::pair<std::vector<string>, int32_t>, vector<idx_t>> partition_groups;
 	for (idx_t row = 0; row < num_rows; row++) {
 		std::vector<string> key;
 		key.reserve(part_idxs.size());
@@ -260,12 +301,12 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 				key.push_back(chunk.GetValue(part_idxs[i], row).ToString());
 			}
 		}
-		auto entry = partition_groups.emplace(std::move(key), vector<idx_t>());
+		auto entry = partition_groups.emplace(std::make_pair(std::move(key), bucket_ids[row]), vector<idx_t>());
 		entry.first->second.push_back(row);
 	}
 
 	for (auto &entry : partition_groups) {
-		auto &key_values = entry.first;
+		auto &key_values = entry.first.first;
 		auto &row_indices = entry.second;
 
 		std::map<string, string> partition;
@@ -282,7 +323,7 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		sub_chunk.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes());
 		sub_chunk.Slice(chunk, sel, row_indices.size());
 
-		write_chunk(sub_chunk, partition, 0);
+		write_chunk(sub_chunk, partition, entry.first.second);
 	}
 
 	lstate.local_count += num_rows;

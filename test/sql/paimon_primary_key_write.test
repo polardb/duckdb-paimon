@@ -1,0 +1,369 @@
+# name: test/sql/paimon_primary_key_write.test
+# group: [sql]
+
+require paimon
+
+require parquet
+
+# DuckDB 1.4 cannot declare partitions or table options in CREATE TABLE.
+# Create empty tables, install schema fixtures while detached, then test INSERT.
+# Invalid fixture options must fail before any data or snapshot is written.
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# The default bucket key is the primary key, independent of physical column order.
+statement ok
+CREATE TABLE pm.d.plain (val VARCHAR, id BIGINT PRIMARY KEY);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"val","type":"STRING"},{"id":1,"name":"id","type":"BIGINT NOT NULL"}],"highestFieldId":1,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"10","bucket-function.type":"mod"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/plain/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.plain VALUES ('negative', -1), ('positive', 27), ('minimum', -9223372036854775808);
+
+query TI
+SELECT val, regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER FROM read_parquet('__TEST_DIR__/pk_buckets/d.db/plain/bucket-*/*.parquet', filename=true) ORDER BY val;
+----
+minimum	2
+negative	9
+positive	7
+
+# Plain INSERT applies the Paimon merge engine; deduplicate replaces existing keys.
+statement ok
+INSERT INTO pm.d.plain (id, val) VALUES (-1, 'replaced');
+
+query IT
+SELECT id, val FROM pm.d.plain ORDER BY id;
+----
+-9223372036854775808	minimum
+-1	replaced
+27	positive
+
+# Partition columns are excluded from the implicit bucket key.
+statement ok
+CREATE TABLE pm.d.partitioned (val VARCHAR, id INTEGER, part VARCHAR, PRIMARY KEY(part, id));
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"val","type":"STRING"},{"id":1,"name":"id","type":"INT NOT NULL"},{"id":2,"name":"part","type":"STRING NOT NULL"}],"highestFieldId":2,"partitionKeys":["part"],"primaryKeys":["part","id"],"options":{"bucket":"10","bucket-function.type":"mod"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/partitioned/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.partitioned BY NAME SELECT 'first' AS val, -1 AS id, 'a' AS part;
+
+statement ok
+INSERT INTO pm.d.partitioned VALUES ('second', -1, 'b'), ('updated', -1, 'a');
+
+query TT
+SELECT part, val FROM pm.d.partitioned ORDER BY part;
+----
+a	updated
+b	second
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/pk_buckets/d.db/partitioned/part=*/bucket-*/*.parquet', filename=true, hive_partitioning=false) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != 9;
+----
+0
+
+# Explicit bucket keys may be a subset of the primary key, in a different order.
+statement ok
+CREATE TABLE pm.d.hive_bucket (s VARCHAR, i INTEGER, extra INTEGER, val VARCHAR, PRIMARY KEY(extra, s, i));
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"s","type":"STRING NOT NULL"},{"id":1,"name":"i","type":"INT NOT NULL"},{"id":2,"name":"extra","type":"INT NOT NULL"},{"id":3,"name":"val","type":"STRING"}],"highestFieldId":3,"partitionKeys":[],"primaryKeys":["extra","s","i"],"options":{"bucket":"8","bucket-key":"i,s","bucket-function.type":"hive"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/hive_bucket/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.hive_bucket VALUES ('hello', 7, 1, 'first'), ('hello', 7, 2, 'second');
+
+query I
+SELECT count(*) FROM pm.d.hive_bucket;
+----
+2
+
+# Java Hive hash: ((0 * 31 + 7) * 31 + hash("hello")) & INT_MAX, modulo 8 = 3.
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/pk_buckets/d.db/hive_bucket/bucket-*/*.parquet', filename=true) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != 3;
+----
+0
+
+# COPY FROM after reattach uses the same routing and merge behavior.
+statement ok
+COPY (SELECT 'copied' AS val, -1::BIGINT AS id) TO '__TEST_DIR__/pk_copy.csv' (HEADER);
+
+statement ok
+DETACH pm;
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+COPY pm.d.plain FROM '__TEST_DIR__/pk_copy.csv' (HEADER);
+
+query T
+SELECT val FROM pm.d.plain WHERE id = -1;
+----
+copied
+
+# All primary-key columns, including partition columns, must be non-NULL.
+statement error
+INSERT INTO pm.d.plain (val) VALUES ('missing key');
+----
+Paimon primary-key columns cannot contain NULL
+
+statement error
+INSERT INTO pm.d.partitioned VALUES ('null partition', 1, NULL);
+----
+Paimon primary-key columns cannot contain NULL
+
+statement error
+INSERT INTO pm.d.plain VALUES ('returning', 4) RETURNING *;
+----
+INSERT RETURNING is not supported for Paimon primary-key tables
+
+statement error
+INSERT INTO pm.d.plain VALUES ('ignored', -1) ON CONFLICT DO NOTHING;
+----
+There are no UNIQUE/PRIMARY KEY constraints that refer to this table
+
+statement error
+INSERT OR REPLACE INTO pm.d.plain VALUES ('ignored', -1);
+----
+There are no UNIQUE/PRIMARY KEY constraints that refer to this table
+
+statement error
+UPDATE pm.d.plain SET val = 'ignored' WHERE id = -1;
+----
+PlanUpdate not supported yet
+
+statement error
+DELETE FROM pm.d.plain WHERE id = -1;
+----
+PlanDelete not supported yet
+
+query T
+SELECT val FROM pm.d.plain WHERE id = -1;
+----
+copied
+
+# Merge-engine semantics are delegated to paimon-cpp, not DuckDB uniqueness checks.
+statement ok
+CREATE TABLE pm.d.first_row (id INTEGER PRIMARY KEY, val VARCHAR);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"val","type":"STRING"}],"highestFieldId":1,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"1","merge-engine":"first-row"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/first_row/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.first_row VALUES (1, 'first');
+
+statement ok
+INSERT INTO pm.d.first_row VALUES (1, 'second');
+
+query T
+SELECT val FROM pm.d.first_row;
+----
+first
+
+statement ok
+CREATE TABLE pm.d.partial_update (id INTEGER PRIMARY KEY, a VARCHAR, b VARCHAR);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"a","type":"STRING"},{"id":2,"name":"b","type":"STRING"}],"highestFieldId":2,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"2","merge-engine":"partial-update"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/partial_update/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.partial_update VALUES (1, 'a', 'b');
+
+statement ok
+INSERT INTO pm.d.partial_update (id, a) VALUES (1, 'updated');
+
+query TT
+SELECT a, b FROM pm.d.partial_update;
+----
+updated	b
+
+statement ok
+CREATE TABLE pm.d.aggregated (id INTEGER PRIMARY KEY, val INTEGER);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"val","type":"INT"}],"highestFieldId":1,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"2","merge-engine":"aggregation","fields.val.aggregate-function":"sum"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/aggregated/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.aggregated VALUES (1, 2);
+
+statement ok
+INSERT INTO pm.d.aggregated VALUES (1, 3);
+
+query I
+SELECT val FROM pm.d.aggregated;
+----
+5
+
+# Sequence fields, rather than arrival order, determine the surviving value.
+statement ok
+CREATE TABLE pm.d.sequenced (id INTEGER PRIMARY KEY, seq BIGINT, val VARCHAR);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"seq","type":"BIGINT"},{"id":2,"name":"val","type":"STRING"}],"highestFieldId":2,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"2","sequence.field":"seq"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/sequenced/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.sequenced VALUES (1, 2, 'newer');
+
+statement ok
+INSERT INTO pm.d.sequenced VALUES (1, 1, 'older');
+
+query T
+SELECT val FROM pm.d.sequenced;
+----
+newer
+
+# Shared fixed-bucket writers must merge concurrent chunks and subsequent commits.
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TEMP TABLE pk_input AS SELECT i::INTEGER AS id FROM range(500000) r(i);
+
+statement ok
+CREATE TABLE pm.d.parallel_pk (id INTEGER PRIMARY KEY, val INTEGER);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"val","type":"INT"}],"highestFieldId":1,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"4","bucket-function.type":"mod"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/parallel_pk/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.parallel_pk SELECT id, 1 FROM pk_input;
+
+statement ok
+INSERT INTO pm.d.parallel_pk SELECT id, 2 FROM pk_input;
+
+query III
+SELECT count(*), min(val), max(val) FROM pm.d.parallel_pk;
+----
+500000	2	2
+
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/pk_buckets/d.db/parallel_pk/bucket-*/*.parquet', filename=true) WHERE regexp_extract(filename, '/bucket-([0-9]+)/', 1)::INTEGER != id % 4;
+----
+0
+
+# Invalid PK bucket keys in existing metadata fail before writing a snapshot.
+statement ok
+CREATE TABLE pm.d.invalid_key (id INTEGER PRIMARY KEY, val INTEGER);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"val","type":"INT"}],"highestFieldId":1,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"2","bucket-key":"val"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/invalid_key/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.invalid_key DEFAULT VALUES;
+----
+Primary keys ["id"] should contain all bucket keys ["val"]
+
+statement ok
+CREATE TABLE pm.d.invalid_partition (id INTEGER, part VARCHAR, PRIMARY KEY(id, part));
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"part","type":"STRING NOT NULL"}],"highestFieldId":1,"partitionKeys":["part"],"primaryKeys":["id","part"],"options":{"bucket":"2","bucket-key":"part"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/invalid_partition/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.invalid_partition DEFAULT VALUES;
+----
+Bucket keys ["part"] should not in partition keys ["part"]
+
+statement ok
+CREATE TABLE pm.d.invalid_cross_partition (id INTEGER PRIMARY KEY, part VARCHAR);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT NOT NULL"},{"id":1,"name":"part","type":"STRING"}],"highestFieldId":1,"partitionKeys":["part"],"primaryKeys":["id"],"options":{"bucket":"2"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/invalid_cross_partition/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.invalid_cross_partition DEFAULT VALUES;
+----
+require all partition keys in the primary key
+
+statement ok
+CREATE TABLE pm.d.invalid_mod (id VARCHAR PRIMARY KEY);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"STRING NOT NULL"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":["id"],"options":{"bucket":"2","bucket-function.type":"mod"},"timeMillis":0}') TO '__TEST_DIR__/pk_buckets/d.db/invalid_mod/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/pk_buckets' AS pm (TYPE paimon);
+
+statement error
+INSERT INTO pm.d.invalid_mod DEFAULT VALUES;
+----
+ModBucketFunction only supports INT or BIGINT
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/pk_buckets/d.db/invalid*/snapshot/snapshot-*');
+----
+0
