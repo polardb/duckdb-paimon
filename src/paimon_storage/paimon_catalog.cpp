@@ -66,6 +66,14 @@ static std::optional<string> TryGetPaimonOptionValue(const unordered_map<string,
 	return {};
 }
 
+static void CheckRESTCatalogWriteSupported(const unordered_map<string, Value> &input_options) {
+	auto metastore = TryGetPaimonOptionValue(input_options, "metastore");
+	if (metastore.has_value() && StringUtil::CIEquals(metastore.value(), "rest")) {
+		throw NotImplementedException("Writing data through a Paimon REST catalog is not supported yet: "
+		                              "REST snapshot commit is not implemented");
+	}
+}
+
 static string GetValidatedFormatOption(const unordered_map<string, Value> &input_options, const string &key,
                                        const string &default_value, const vector<string> &supported_values) {
 	auto raw_value = TryGetPaimonOptionValue(input_options, key);
@@ -312,6 +320,7 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 	if (access_mode == AccessMode::READ_ONLY) {
 		throw PermissionException("Cannot write to a read-only Paimon catalog");
 	}
+	CheckRESTCatalogWriteSupported(attached_options);
 
 	auto &base = op.info->Base();
 	paimon::Identifier table_identifier(base.schema, base.table);
@@ -336,6 +345,7 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 	if (access_mode == AccessMode::READ_ONLY) {
 		throw PermissionException("Cannot write to a read-only Paimon catalog");
 	}
+	CheckRESTCatalogWriteSupported(attached_options);
 
 	auto &table = op.table;
 	paimon::Identifier table_identifier(table.schema.name, table.name);
