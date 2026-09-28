@@ -24,6 +24,9 @@
 
 #include "paimon_functions.hpp"
 
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+
 #include "paimon/catalog/catalog.h"
 
 namespace duckdb {
@@ -66,13 +69,19 @@ PaimonTablePath PaimonTablePath::Parse(const vector<Value> &inputs) {
 	return result;
 }
 
-vector<TableFunctionSet> PaimonFunctions::GetTableFunctions() {
-	vector<TableFunctionSet> functions;
+void PaimonFunctions::RegisterTableFunction(ExtensionLoader &loader, CreateTableFunctionInfo info) {
+	auto name = info.name;
+	loader.RegisterFunction(std::move(info));
+	auto &entry = loader.GetTableFunction(name);
 
-	functions.push_back(GetPaimonScanFunction());
-	functions.push_back(GetPaimonSnapshotsFunction());
-
-	return functions;
+	for (idx_t i = 0; i < entry.functions.Size(); i++) {
+		// Match the copy used by duckdb_functions() to generate parameter types.
+		auto fun = entry.functions.GetFunctionByOffset(i);
+		auto &desc = entry.descriptions[i];
+		for (const auto &param : fun.named_parameters) {
+			desc.parameter_names.push_back(param.first);
+		}
+	}
 }
 
 } // namespace duckdb

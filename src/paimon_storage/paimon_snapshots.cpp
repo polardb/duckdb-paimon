@@ -108,20 +108,45 @@ static void PaimonSnapshotsExecute(ClientContext &context, TableFunctionInput &i
 	output.SetCardinality(count);
 }
 
-TableFunctionSet PaimonFunctions::GetPaimonSnapshotsFunction() {
-	TableFunctionSet function_set("paimon_snapshots");
-
-	auto fun = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, PaimonSnapshotsExecute,
-	                         PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
+static void AddPaimonSnapshotsThreePartFunction(CreateTableFunctionInfo &info) {
+	auto fun = TableFunction("paimon_snapshots", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                         PaimonSnapshotsExecute, PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
 	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
-	function_set.AddFunction(fun);
+	info.functions.AddFunction(fun);
 
-	auto fun_fullpath =
-	    TableFunction({LogicalType::VARCHAR}, PaimonSnapshotsExecute, PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
+	FunctionDescription desc;
+	desc.parameter_types = fun.arguments;
+	desc.parameter_names = {"warehouse", "database", "table"};
+	desc.description = "List a Paimon table's snapshots, including snapshot IDs, commit times and record counts. "
+	                   "manifest_format is deprecated; the format is detected from the table schema.";
+	desc.examples = {"SELECT * FROM paimon_snapshots('./data', 'testdb', 'testtbl');"};
+	desc.categories = {"paimon"};
+	info.descriptions.push_back(std::move(desc));
+}
+
+static void AddPaimonSnapshotsFullPathFunction(CreateTableFunctionInfo &info) {
+	auto fun_fullpath = TableFunction("paimon_snapshots", {LogicalType::VARCHAR}, PaimonSnapshotsExecute,
+	                                  PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
 	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
-	function_set.AddFunction(fun_fullpath);
+	info.functions.AddFunction(fun_fullpath);
 
-	return function_set;
+	FunctionDescription desc_fullpath;
+	desc_fullpath.parameter_types = fun_fullpath.arguments;
+	desc_fullpath.parameter_names = {"table_path"};
+	desc_fullpath.description =
+	    "List a Paimon table's snapshots, including snapshot IDs, commit times and record counts. "
+	    "manifest_format is deprecated; the format is detected from the table schema.";
+	desc_fullpath.examples = {"SELECT * FROM paimon_snapshots('./data/testdb.db/testtbl');"};
+	desc_fullpath.categories = {"paimon"};
+	info.descriptions.push_back(std::move(desc_fullpath));
+}
+
+CreateTableFunctionInfo PaimonFunctions::GetPaimonSnapshotsFunction() {
+	CreateTableFunctionInfo info(TableFunctionSet("paimon_snapshots"));
+	info.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+	AddPaimonSnapshotsThreePartFunction(info);
+	AddPaimonSnapshotsFullPathFunction(info);
+	return info;
 }
 
 } // namespace duckdb
