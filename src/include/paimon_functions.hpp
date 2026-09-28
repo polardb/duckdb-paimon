@@ -24,9 +24,11 @@
 
 #pragma once
 
-#include "duckdb/function/function_set.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 namespace duckdb {
+
+class ExtensionLoader;
 
 struct PaimonTablePath {
 	string warehouse;
@@ -38,11 +40,9 @@ struct PaimonTablePath {
 
 class PaimonFunctions {
 public:
-	static vector<TableFunctionSet> GetTableFunctions();
-
-private:
-	static TableFunctionSet GetPaimonScanFunction();
-	static TableFunctionSet GetPaimonSnapshotsFunction();
+	static void RegisterTableFunction(ExtensionLoader &loader, CreateTableFunctionInfo info);
+	static CreateTableFunctionInfo GetPaimonScanFunction();
+	static CreateTableFunctionInfo GetPaimonSnapshotsFunction();
 };
 
 } // namespace duckdb

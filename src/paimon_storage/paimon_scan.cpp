@@ -975,11 +975,9 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 	return;
 }
 
-TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
-	TableFunctionSet function_set("paimon_scan");
-
-	auto fun = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, PaimonScan,
-	                         PaimonScanBind, PaimonScanInitGlobal);
+static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
+	auto fun = TableFunction("paimon_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                         PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
 	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
 	fun.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated: auto-detected from table schema
 	fun.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
@@ -990,9 +988,22 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
 	fun.get_partition_stats = PaimonGetPartitionStats;
-	function_set.AddFunction(fun);
+	info.functions.AddFunction(fun);
 
-	auto fun_fullpath = TableFunction({LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
+	FunctionDescription desc;
+	desc.parameter_types = fun.arguments;
+	desc.parameter_names = {"warehouse", "database", "table"};
+	desc.description = "Read a Paimon table, optionally at a historical snapshot using either snapshot_from_id or "
+	                   "snapshot_from_timestamp, but not both. manifest_format and file_format are deprecated; "
+	                   "formats are detected from the table schema. debug_expected_splits is for testing only.";
+	desc.examples = {"SELECT * FROM paimon_scan('./data', 'testdb', 'testtbl');"};
+	desc.categories = {"paimon"};
+	info.descriptions.push_back(std::move(desc));
+}
+
+static void AddPaimonScanFullPathFunction(CreateTableFunctionInfo &info) {
+	auto fun_fullpath =
+	    TableFunction("paimon_scan", {LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
 	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
 	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated
 	fun_fullpath.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
@@ -1003,9 +1014,27 @@ TableFunctionSet PaimonFunctions::GetPaimonScanFunction() {
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;
 	fun_fullpath.get_partition_stats = PaimonGetPartitionStats;
-	function_set.AddFunction(fun_fullpath);
+	info.functions.AddFunction(fun_fullpath);
 
-	return function_set;
+	FunctionDescription desc_fullpath;
+	desc_fullpath.parameter_types = fun_fullpath.arguments;
+	desc_fullpath.parameter_names = {"table_path"};
+	desc_fullpath.description =
+	    "Read a Paimon table, optionally at a historical snapshot using either snapshot_from_id or "
+	    "snapshot_from_timestamp, but not both. manifest_format and file_format are deprecated; "
+	    "formats are detected from the table schema. debug_expected_splits is for testing only.";
+	desc_fullpath.examples = {"SELECT * FROM paimon_scan('./data/testdb.db/testtbl');",
+	                          "SELECT * FROM paimon_scan('./data/testdb.db/testtbl', snapshot_from_id=2);"};
+	desc_fullpath.categories = {"paimon"};
+	info.descriptions.push_back(std::move(desc_fullpath));
+}
+
+CreateTableFunctionInfo PaimonFunctions::GetPaimonScanFunction() {
+	CreateTableFunctionInfo info(TableFunctionSet("paimon_scan"));
+	info.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+	AddPaimonScanThreePartFunction(info);
+	AddPaimonScanFullPathFunction(info);
+	return info;
 }
 
 } // namespace duckdb
