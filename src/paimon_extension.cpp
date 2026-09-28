@@ -86,9 +86,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	credential_chain_fun.named_parameters["path_style_access"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(credential_chain_fun);
 
-	for (auto &fun : PaimonFunctions::GetTableFunctions()) {
-		loader.RegisterFunction(fun);
-	}
+	PaimonFunctions::RegisterTableFunction(loader, PaimonFunctions::GetPaimonScanFunction());
+	PaimonFunctions::RegisterTableFunction(loader, PaimonFunctions::GetPaimonSnapshotsFunction());
 
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);

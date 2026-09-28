@@ -1,0 +1,44 @@
+# name: test/sql/paimon_functions.test
+# group: [sql]
+
+require paimon
+
+# Both overloads of each function have documentation and matching parameter types.
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name IN ('paimon_scan', 'paimon_snapshots')
+  AND function_type = 'table'
+  AND length(description) > 0
+  AND length(examples) > 0
+  AND list_contains(categories, 'paimon')
+  AND length(parameters) = length(parameter_types);
+----
+4
+
+# Positional names must match the overload; named parameters must not become colN.
+query TTT
+SELECT function_name,
+       parameters[:CASE WHEN parameters[1] = 'table_path' THEN 1 ELSE 3 END],
+       list_sort(parameters)
+FROM duckdb_functions()
+WHERE function_name IN ('paimon_scan', 'paimon_snapshots')
+ORDER BY function_name, length(parameters);
+----
+paimon_scan	[table_path]	[debug_expected_splits, file_format, manifest_format, snapshot_from_id, snapshot_from_timestamp, table_path]
+paimon_scan	[warehouse, database, table]	[database, debug_expected_splits, file_format, manifest_format, snapshot_from_id, snapshot_from_timestamp, table, warehouse]
+paimon_snapshots	[table_path]	[manifest_format, table_path]
+paimon_snapshots	[warehouse, database, table]	[database, manifest_format, table, warehouse]
+
+# Named parameter names must still correspond to their actual types.
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name = 'paimon_scan'
+  AND parameter_types[list_position(parameters, 'debug_expected_splits')] = 'BIGINT'
+  AND parameter_types[list_position(parameters, 'file_format')] = 'VARCHAR'
+  AND parameter_types[list_position(parameters, 'manifest_format')] = 'VARCHAR'
+  AND parameter_types[list_position(parameters, 'snapshot_from_id')] = 'BIGINT'
+  AND parameter_types[list_position(parameters, 'snapshot_from_timestamp')] = 'TIMESTAMP';
+----
+2
