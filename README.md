@@ -108,6 +108,8 @@ DROP TABLE my_catalog.my_db.orders;
 DROP SCHEMA my_catalog.my_db;
 ```
 
+`CREATE TABLE` maps a DuckDB `BLOB` column to Paimon `BYTES`; `INSERT` can also write to existing Paimon `BLOB` columns. Inserting into a column type that the write path cannot convert yet, such as `TIMESTAMP(3) WITH LOCAL TIME ZONE`, fails with an error.
+
 To prevent accidental writes, attach the catalog in read-only mode:
 
 ```sql

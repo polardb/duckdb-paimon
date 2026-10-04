@@ -25,6 +25,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -42,7 +43,9 @@
 #include "paimon_catalog.hpp"
 #include "paimon_insert.hpp"
 #include "paimon_schema_entry.hpp"
+#include "paimon_type_utils.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 
@@ -80,6 +83,9 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 	string null_part_name = "__DEFAULT_PARTITION__";
 	PaimonBucketInfo bucket_info;
 	vector<unique_ptr<PaimonBucketWriter>> bucket_writers;
+
+	ClientProperties arrow_props;
+	vector<idx_t> widened_offset_cols;
 };
 
 struct PaimonInsertLocalState : public LocalSinkState {
@@ -89,11 +95,120 @@ struct PaimonInsertLocalState : public LocalSinkState {
 };
 
 // ---------------------------------------------------------------------------
+// Arrow layout
+// ---------------------------------------------------------------------------
+
+static string NormalizeArrowFormat(const char *format) {
+	string result = format;
+	if (StringUtil::StartsWith(result, "ts")) {
+		// The time zone does not affect the layout of a timestamp
+		return result.substr(0, 4);
+	}
+	if (StringUtil::StartsWith(result, "d:") && std::count(result.begin(), result.end(), ',') == 1) {
+		// Arrow C++ omits the default decimal bit width, which DuckDB always writes
+		return result + ",128";
+	}
+	return result;
+}
+
+// Returns the first pair of fields whose layouts differ, or null pointers if the layouts match
+static pair<const ArrowSchema *, const ArrowSchema *> FindArrowLayoutMismatch(const ArrowSchema &actual,
+                                                                              const ArrowSchema &expected) {
+	if (NormalizeArrowFormat(actual.format) != NormalizeArrowFormat(expected.format) ||
+	    actual.n_children != expected.n_children) {
+		return {&actual, &expected};
+	}
+	for (int64_t i = 0; i < actual.n_children; i++) {
+		auto mismatch = FindArrowLayoutMismatch(*actual.children[i], *expected.children[i]);
+		if (mismatch.first) {
+			return mismatch;
+		}
+	}
+	return {nullptr, nullptr};
+}
+
+// paimon-cpp imports each batch with the table schema and cannot reliably detect a layout mismatch, so
+// check the exported layout up front. Returns the binary columns to widen for Paimon BLOB columns, which
+// are large_binary and only allowed as top-level fields.
+static vector<idx_t> BindArrowLayout(const ArrowSchema &table_schema, const vector<LogicalType> &types,
+                                     ClientProperties &arrow_props) {
+	if (table_schema.n_children != NumericCast<int64_t>(types.size())) {
+		throw IOException("Paimon table schema has %d columns, but the insert produces %d columns",
+		                  table_schema.n_children, types.size());
+	}
+	vector<string> names;
+	for (int64_t i = 0; i < table_schema.n_children; i++) {
+		names.push_back(table_schema.children[i]->name);
+	}
+	ArrowSchemaWrapper chunk_schema;
+	ArrowConverter::ToArrowSchema(&chunk_schema.arrow_schema, types, names, arrow_props);
+
+	vector<idx_t> widened_offset_cols;
+	for (idx_t i = 0; i < types.size(); i++) {
+		auto &actual = *chunk_schema.arrow_schema.children[i];
+		auto &expected = *table_schema.children[i];
+		auto mismatch = FindArrowLayoutMismatch(actual, expected);
+		if (!mismatch.first) {
+			continue;
+		}
+		if (string(actual.format) == "z" && string(expected.format) == "Z") {
+			widened_offset_cols.push_back(i);
+			continue;
+		}
+		throw NotImplementedException(
+		    "Cannot write %s to Paimon column \"%s\": DuckDB exports Arrow format \"%s\", but the table expects \"%s\"",
+		    types[i].ToString(), names[i], string(mismatch.first->format), string(mismatch.second->format));
+	}
+	return widened_offset_cols;
+}
+
+// Owns the widened offsets and the original child, whose validity and data buffers are reused
+struct PaimonWidenedOffsets {
+	ArrowArray original;
+	vector<int64_t> offsets;
+	const void *buffers[3];
+};
+
+static void ReleaseWidenedOffsets(ArrowArray *array) {
+	if (!array || !array->release) {
+		return;
+	}
+	auto holder = static_cast<PaimonWidenedOffsets *>(array->private_data);
+	if (holder->original.release) {
+		holder->original.release(&holder->original);
+	}
+	delete holder;
+	array->release = nullptr;
+}
+
+// Turns a binary child into large_binary in place, released along with its parent
+static void WidenBinaryOffsets(ArrowArray &array) {
+	D_ASSERT(array.n_buffers == 3 && array.n_children == 0);
+	auto holder = make_uniq<PaimonWidenedOffsets>();
+	holder->original = array;
+	auto count = NumericCast<idx_t>(array.offset + array.length) + 1;
+	holder->offsets.resize(count, 0);
+	if (array.length > 0) {
+		auto offsets = static_cast<const int32_t *>(array.buffers[1]);
+		for (idx_t i = 0; i < count; i++) {
+			holder->offsets[i] = offsets[i];
+		}
+	}
+	holder->buffers[0] = array.buffers[0];
+	holder->buffers[1] = holder->offsets.data();
+	holder->buffers[2] = array.buffers[2];
+	array.buffers = holder->buffers;
+	array.private_data = holder.release();
+	array.release = ReleaseWidenedOffsets;
+}
+
+// ---------------------------------------------------------------------------
 // Sink interface
 // ---------------------------------------------------------------------------
 
 unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientContext &context) const {
 	auto state = make_uniq<PaimonInsertGlobalState>();
+	state->arrow_props = PaimonTypeUtils::GetArrowWriteProperties(context);
 
 	if (info) {
 		auto &paimon_schema = schema->Cast<PaimonSchemaEntry>();
@@ -124,6 +239,10 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 		ArrowSchemaWrapper arrow_schema;
 		arrow_schema.arrow_schema = *arrow_schema_result.value();
 		arrow_schema_result.value()->release = nullptr;
+		if (!children.empty()) {
+			state->widened_offset_cols =
+			    BindArrowLayout(arrow_schema.arrow_schema, children[0].get().GetTypes(), state->arrow_props);
+		}
 		ArrowTableSchema arrow_table;
 		ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table, arrow_schema.arrow_schema);
 		state->bucket_info = PaimonBucketInfo::Bind(arrow_table.GetNames(), arrow_table.GetTypes(), part_keys,
@@ -199,12 +318,15 @@ unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionCont
 	return std::move(lstate);
 }
 
-static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataChunk &chunk, ClientContext &client,
+static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataChunk &chunk,
+                                                                          const PaimonInsertGlobalState &gstate,
                                                                           const std::map<string, string> &partition,
                                                                           int32_t bucket) {
 	ArrowArrayWrapper arrow_wrapper;
-	auto client_props = client.GetClientProperties();
-	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, client_props, {});
+	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, gstate.arrow_props, {});
+	for (auto col : gstate.widened_offset_cols) {
+		WidenBinaryOffsets(*arrow_wrapper.arrow_array.children[col]);
+	}
 
 	paimon::RecordBatchBuilder batch_builder(&arrow_wrapper.arrow_array);
 	if (!partition.empty()) {
@@ -232,7 +354,7 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		}
 	}
 	auto write_chunk = [&](DataChunk &data, const std::map<string, string> &partition, int32_t bucket) {
-		auto batch = BuildRecordBatchWithPartition(data, context.client, partition, bucket);
+		auto batch = BuildRecordBatchWithPartition(data, gstate, partition, bucket);
 		if (gstate.bucket_writers.empty()) {
 			auto status = lstate.writer->Write(std::move(batch));
 			if (!status.ok()) {
@@ -268,10 +390,10 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		bucket_keys.ReferenceColumns(chunk, bucket_info.column_ids);
 		ArrowArrayWrapper bucket_array;
 		ArrowSchemaWrapper bucket_schema;
-		auto client_props = context.client.GetClientProperties();
-		ArrowConverter::ToArrowArray(bucket_keys, &bucket_array.arrow_array, client_props, {});
+		auto arrow_props = gstate.arrow_props;
+		ArrowConverter::ToArrowArray(bucket_keys, &bucket_array.arrow_array, arrow_props, {});
 		ArrowConverter::ToArrowSchema(&bucket_schema.arrow_schema, bucket_info.column_types, bucket_info.column_names,
-		                              client_props);
+		                              arrow_props);
 		auto status = lstate.bucket_calculator->CalculateBucketIds(&bucket_array.arrow_array,
 		                                                           &bucket_schema.arrow_schema, bucket_ids.data());
 		if (!status.ok()) {

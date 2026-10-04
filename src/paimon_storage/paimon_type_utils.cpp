@@ -143,4 +143,16 @@ std::optional<paimon::Literal> PaimonTypeUtils::ConvertLiteral(const Value &valu
 	}
 }
 
+ClientProperties PaimonTypeUtils::GetArrowWriteProperties(ClientContext &context) {
+	ClientProperties props;
+	props.time_zone = context.GetClientProperties().time_zone;
+	props.arrow_offset_size = ArrowOffsetSize::REGULAR;
+	props.arrow_use_list_view = false;
+	props.produce_arrow_string_view = false;
+	props.arrow_lossless_conversion = false;
+	props.arrow_output_version = ArrowFormatVersion::V1_0;
+	props.client_context = &context;
+	return props;
+}
+
 } // namespace duckdb

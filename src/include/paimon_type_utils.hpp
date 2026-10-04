@@ -25,6 +25,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "duckdb/main/client_properties.hpp"
 
 #include "paimon/data/decimal.h"
 #include "paimon/data/timestamp.h"
@@ -46,6 +47,10 @@ public:
 	/// Returns std::nullopt if the type is not supported for literal conversion.
 	/// Throws IOException if the value is NULL.
 	static std::optional<paimon::Literal> ConvertLiteral(const Value &value, paimon::FieldType field_type);
+
+	/// Arrow export options for schemas and data handed to paimon-cpp. Session Arrow settings such as
+	/// arrow_large_buffer_size are ignored, since paimon-cpp imports data with the table schema.
+	static ClientProperties GetArrowWriteProperties(ClientContext &context);
 };
 
 } // namespace duckdb
