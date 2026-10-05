@@ -136,6 +136,10 @@ ORDER BY snapshot_id;
 
 Query a historical version of a table by snapshot ID or by timestamp. Use `paimon_snapshots` first to identify the snapshot you want.
 
+The current development implementation retains snapshot and schema identity per
+bound scan. See [bound scan consistency](docs/snapshot-binding.md) for prepared
+execution behavior, compatibility changes and limitations.
+
 When using an ATTACHed catalog, use DuckDB's native `AT` clause. For a single table scan, pass the same snapshot option to `paimon_scan`:
 
 ```sql

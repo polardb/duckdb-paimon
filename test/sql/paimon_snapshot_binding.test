@@ -1,0 +1,291 @@
+# name: test/sql/paimon_snapshot_binding.test
+# group: [sql]
+
+# Every INSERT is a real commit. The callback test covers external commits
+# between phases of ONE binding; PREPARE/EXECUTE deliberately rebinds.
+require paimon
+
+# Plan serialization is a separate contract: verification can rebind a scan
+# without preserving its snapshot. These cases exercise a single live binding.
+require no_alternative_verify
+
+statement ok
+ATTACH './data' AS bound_pm (TYPE paimon);
+
+statement ok
+DROP SCHEMA IF EXISTS bound_pm.__test_binding CASCADE;
+
+statement ok
+CREATE SCHEMA bound_pm.__test_binding;
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.t (id INTEGER, value INTEGER);
+
+query II
+EXPLAIN SELECT * FROM bound_pm.__test_binding.t;
+----
+physical_plan	<REGEX>:.*Bound Snapshot:.*empty-at-bind.*Read Schema: 0.*
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/t', snapshot_from_id=1);
+----
+<REGEX>:.*(snapshot|Snapshot).*
+
+query I
+SELECT 42;
+----
+42
+
+statement ok
+INSERT INTO bound_pm.__test_binding.t VALUES (1,10),(2,20);
+
+query II
+EXPLAIN SELECT * FROM paimon_scan('./data/__test_binding.db/t');
+----
+physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
+
+query II
+EXPLAIN SELECT * FROM paimon_scan('./data', '__test_binding', 't');
+----
+physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
+
+statement ok
+PREPARE latest_direct AS SELECT * FROM paimon_scan('./data/__test_binding.db/t') ORDER BY id;
+
+statement ok
+PREPARE latest_catalog AS SELECT * FROM bound_pm.__test_binding.t ORDER BY id;
+
+statement ok
+PREPARE historical AS SELECT * FROM bound_pm.__test_binding.t AT (VERSION => 1) ORDER BY id;
+
+statement ok
+INSERT INTO bound_pm.__test_binding.t VALUES (3,30);
+
+query II
+EXECUTE latest_direct;
+----
+1	10
+2	20
+3	30
+
+query II
+EXECUTE latest_catalog;
+----
+1	10
+2	20
+3	30
+
+query II
+EXECUTE historical;
+----
+1	10
+2	20
+
+query II
+EXPLAIN SELECT * FROM bound_pm.__test_binding.t AT (VERSION => 1);
+----
+physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
+
+query II
+SELECT * FROM paimon_scan('./data', '__test_binding', 't', snapshot_from_id=1) ORDER BY id;
+----
+1	10
+2	20
+
+query II
+SELECT * FROM paimon_scan('./data/__test_binding.db/t', snapshot_from_timestamp=TIMESTAMP '2099-01-01') ORDER BY id;
+----
+1	10
+2	20
+3	30
+
+query III
+SELECT a.id,a.value,b.value FROM paimon_scan('./data/__test_binding.db/t',snapshot_from_id=1) a JOIN paimon_scan('./data/__test_binding.db/t',snapshot_from_id=2) b USING(id) ORDER BY a.id;
+----
+1	10	10
+2	20	20
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/t',snapshot_from_id=99);
+----
+<REGEX>:.*(snapshot|Snapshot).*
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/t',snapshot_from_timestamp=TIMESTAMP '1900-01-01');
+----
+<REGEX>:.*snapshot.*
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/t',snapshot_from_id=1,snapshot_from_timestamp=TIMESTAMP '2099-01-01');
+----
+Cannot specify both
+
+query I
+SELECT count(*) FROM bound_pm.__test_binding.t WHERE id > 100;
+----
+0
+
+query II
+EXPLAIN SELECT * FROM paimon_scan('./data/__test_binding.db/t') WHERE id > 100;
+----
+physical_plan	<REGEX>:.*Bound Snapshot: 2.*Read Schema: 0.*
+
+query I
+SELECT 42;
+----
+42
+
+statement ok
+PREPARE parameterized_path AS SELECT * FROM paimon_scan($1) ORDER BY id;
+
+statement ok
+INSERT INTO bound_pm.__test_binding.t VALUES (4,40);
+
+query II
+EXECUTE parameterized_path('./data/__test_binding.db/t');
+----
+1	10
+2	20
+3	30
+4	40
+
+query II
+EXECUTE latest_direct;
+----
+1	10
+2	20
+3	30
+4	40
+
+query II
+EXECUTE latest_catalog;
+----
+1	10
+2	20
+3	30
+4	40
+
+# Uppercase modes and numeric table options retain native parsing compatibility.
+statement ok
+CREATE TABLE bound_pm.__test_binding.options (id INTEGER) WITH ("scan.mode"='DEFAULT',"scan.snapshot-id"='01');
+
+statement ok
+INSERT INTO bound_pm.__test_binding.options VALUES (1);
+
+statement ok
+INSERT INTO bound_pm.__test_binding.options VALUES (2);
+
+query I
+SELECT * FROM paimon_scan('./data/__test_binding.db/options');
+----
+1
+
+query II
+EXPLAIN SELECT * FROM paimon_scan('./data/__test_binding.db/options');
+----
+physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.other_branch (id INTEGER) WITH ("branch"='audit');
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/other_branch');
+----
+supports only the default branch
+
+# Branch suffixes must not be silently resolved against main, even if absent.
+statement error
+SELECT * FROM paimon_scan('./data', '__test_binding', 't$branch_audit');
+----
+supports only the default branch
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/t$branch_audit');
+----
+supports only the default branch
+
+statement error
+SELECT * FROM bound_pm.__test_binding."t$branch_audit";
+----
+supports only the default branch
+
+# Reject non-data schemas explicitly; paimon_snapshots has its own function.
+statement error
+SELECT count(*) FROM paimon_scan('./data/__test_binding.db/t$schemas');
+----
+requires a data-table schema
+
+# Metadata remains available even when the reader is unsupported.
+statement ok
+CREATE TABLE bound_pm.__test_binding.unsupported_pk (id INTEGER PRIMARY KEY);
+
+query IIIIII
+DESCRIBE bound_pm.__test_binding.unsupported_pk;
+----
+id	INTEGER	YES	NULL	NULL	NULL
+
+statement ok
+CREATE VIEW unsupported_pk_view AS SELECT * FROM bound_pm.__test_binding.unsupported_pk;
+
+statement error
+SELECT * FROM unsupported_pk_view;
+----
+do not support pk table bucket=-1
+
+statement error
+SELECT count(*) FROM bound_pm.__test_binding.unsupported_pk;
+----
+do not support pk table bucket=-1
+
+# Explicit modes cannot silently override conflicting effective selectors.
+statement ok
+CREATE TABLE bound_pm.__test_binding.mode_latest (id INTEGER) WITH ('scan.mode'='latest','scan.snapshot-id'='1');
+
+statement error
+SELECT * FROM bound_pm.__test_binding.mode_latest;
+----
+scan.mode conflicts
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.mode_time (id INTEGER) WITH ('scan.mode'='from-timestamp','scan.snapshot-id'='1');
+
+statement error
+SELECT * FROM bound_pm.__test_binding.mode_time;
+----
+scan.mode conflicts
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.mode_id (id INTEGER) WITH ('scan.mode'='from-snapshot','scan.timestamp-millis'='1');
+
+statement error
+SELECT * FROM bound_pm.__test_binding.mode_id;
+----
+scan.mode conflicts
+
+statement error
+CREATE TABLE bound_pm.__test_binding.invalid_id (id INTEGER) WITH ('scan.snapshot-id'='999999999999999999999999');
+----
+Invalid Config
+
+# Historical data is projected using the latest schema captured at this bind.
+# These are genuine schema-evolution histories already checked into the repo.
+query IIT
+SELECT * FROM paimon_scan('./data/schema_evolution.db/readded',snapshot_from_id=1);
+----
+1	10	NULL
+
+query TII
+SELECT * FROM paimon_scan('./data/schema_evolution.db/mixed_types',snapshot_from_id=1);
+----
+before	1	10
+
+query II
+EXPLAIN SELECT * FROM paimon_scan('./data/schema_evolution.db/mixed_types',snapshot_from_id=1);
+----
+physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 1.*
+
+statement ok
+DROP SCHEMA bound_pm.__test_binding CASCADE;
+
+statement ok
+DETACH bound_pm;
