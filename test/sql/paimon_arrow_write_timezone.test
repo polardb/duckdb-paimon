@@ -1,0 +1,175 @@
+# name: test/sql/paimon_arrow_write_timezone.test
+# group: [sql]
+
+require paimon
+
+require icu
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_write_timezone' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# A timezone label change does not change the UTC instant layout.
+statement ok
+CREATE TABLE pm.d.tz (ts TIMESTAMPTZ);
+
+statement ok
+SET TimeZone = 'Asia/Shanghai';
+
+statement ok
+INSERT INTO pm.d.tz VALUES (TIMESTAMPTZ '2026-01-01 00:00:00+00');
+
+query I
+SELECT ts = TIMESTAMPTZ '2026-01-01 08:00:00+08' FROM pm.d.tz;
+----
+true
+
+statement ok
+DETACH pm;
+
+foreach format parquet orc
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_write_timestamp_${format}' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+statement ok
+CREATE TABLE pm.d.timestamps (id INTEGER);
+
+statement ok
+DETACH pm;
+
+# Low-precision LTZ fields all bind as DuckDB TIMESTAMPTZ (microseconds).
+# Nested required fields must accept non-NULL data despite DuckDB's nullable schema.
+statement ok
+COPY (SELECT $${
+  "version": 3, "id": 0,
+  "fields": [
+    {"id": 0, "name": "id", "type": "INT"},
+    {"id": 1, "name": "seconds", "type": "TIMESTAMP_LTZ(0)"},
+    {"id": 2, "name": "millis", "type": "TIMESTAMP_LTZ(3)"},
+    {"id": 3, "name": "micros", "type": "TIMESTAMP_LTZ(6)"},
+    {"id": 4, "name": "nanos", "type": "TIMESTAMP_LTZ(9)"},
+    {"id": 5, "name": "r", "type": {"type": "ROW", "fields": [
+      {"id": 6, "name": "ts", "type": "TIMESTAMP_LTZ(3) NOT NULL"}]}},
+    {"id": 7, "name": "a", "type": {"type": "ARRAY", "element": "TIMESTAMP_LTZ(3)"}},
+    {"id": 8, "name": "m", "type": {"type": "MAP", "key": "STRING", "value": {"type": "ROW", "fields": [
+      {"id": 9, "name": "ts", "type": "TIMESTAMP_LTZ(3) NOT NULL"}]}}},
+    {"id": 10, "name": "part", "type": "STRING"}
+  ],
+  "highestFieldId": 10, "partitionKeys": ["part"], "primaryKeys": [],
+  "options": {"file.format": "${format}", "manifest.format": "avro", "orc.timestamp-ltz.legacy.type": "false"},
+  "timeMillis": 0
+}$$) TO '__TEST_DIR__/arrow_write_timestamp_${format}/d.db/timestamps/schema/schema-0' (HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_write_timestamp_${format}' AS pm (TYPE paimon);
+
+# Positive and negative epochs, interleaved partitions, and sub-unit fractions.
+statement ok
+INSERT INTO pm.d.timestamps
+SELECT i, ts, ts, ts, ns, {'ts': ts}, [ts, NULL], MAP {'key': {'ts': ts}}, 'p' || (i % 2)
+FROM (VALUES
+  (1, TIMESTAMPTZ '1970-01-01 00:00:01.234567+00', TIMESTAMPTZ '1970-01-01 00:00:01.234567+00'),
+  (2, TIMESTAMPTZ '1969-12-31 23:59:58.765433+00', TIMESTAMPTZ '1969-12-31 23:59:58.765433+00'),
+  (3, TIMESTAMPTZ '1970-01-01 00:00:00.000999+00', TIMESTAMPTZ '1970-01-01 00:00:00.000999+00')) v(i, ts, ns);
+
+statement ok
+INSERT INTO pm.d.timestamps VALUES (4, NULL, NULL, NULL, NULL, {'ts': TIMESTAMPTZ '1970-01-01 00:00:00+00'}, [], MAP {}, 'p0');
+
+statement ok
+DETACH pm;
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_write_timestamp_${format}' AS pm (TYPE paimon);
+
+query IIIIIIII
+SELECT id, epoch_us(seconds), epoch_us(millis), epoch_us(micros), epoch_ns(nanos), epoch_us(r.ts), epoch_us(a[1]), epoch_us(m['key'].ts)
+FROM pm.d.timestamps ORDER BY id;
+----
+1	1000000	1234000	1234567	1234567000	1234000	1234000	1234000
+2	-1000000	-1234000	-1234567	-1234567000	-1234000	-1234000	-1234000
+3	0	0	999	999000	0	0	0
+4	NULL	NULL	NULL	NULL	0	NULL	NULL
+
+query III
+SELECT count(*) FILTER (WHERE a[2] IS NULL), count(*) FILTER (WHERE len(a) = 0), count(*) FILTER (WHERE cardinality(m) = 0) FROM pm.d.timestamps;
+----
+4	1	1
+
+# Required nested fields still reject actual nulls without committing a row.
+statement error
+INSERT INTO pm.d.timestamps (id, r, part) VALUES (5, {'ts': NULL}, 'p0');
+----
+not nullable while data have null value
+
+# Scaling microseconds to nanoseconds must reject overflow before writing.
+statement error
+INSERT INTO pm.d.timestamps (id, nanos, r, part) VALUES
+    (5, TIMESTAMPTZ '3000-01-01 00:00:00+00', {'ts': TIMESTAMPTZ '1970-01-01 00:00:00+00'}, 'p0');
+----
+out of bounds
+
+query I
+SELECT count(*) FROM pm.d.timestamps;
+----
+4
+
+# Conversion and Arrow buffer ownership across several chunks and partitions.
+statement ok
+INSERT INTO pm.d.timestamps (part, a, r, millis, id)
+SELECT 'p' || (i % 2), [ts, NULL], {'ts': ts}, ts, i
+FROM range(1000, 6000) v(i), (SELECT TIMESTAMPTZ '1970-01-01 00:00:01.234567+00' AS ts);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE epoch_us(millis) = 1234000 AND epoch_us(r.ts) = 1234000 AND epoch_us(a[1]) = 1234000 AND a[2] IS NULL AND part = 'p' || (id % 2)) FROM pm.d.timestamps WHERE id >= 1000;
+----
+5000	5000
+
+statement ok
+CREATE TABLE pm.d.timestamp_keys (id INTEGER);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT $${
+  "version": 3, "id": 0,
+  "fields": [{"id": 0, "name": "ts", "type": "TIMESTAMP_LTZ(3) NOT NULL"}],
+  "highestFieldId": 0, "partitionKeys": [], "primaryKeys": ["ts"],
+  "options": {"bucket": "17", "file.format": "${format}", "manifest.format": "avro", "orc.timestamp-ltz.legacy.type": "false"},
+  "timeMillis": 0
+}$$) TO '__TEST_DIR__/arrow_write_timestamp_${format}/d.db/timestamp_keys/schema/schema-0' (HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_write_timestamp_${format}' AS pm (TYPE paimon);
+
+# Bucket hashing must use the stored precision, not DuckDB's TIMESTAMPTZ precision.
+# Both inserts normalize to the same 100 primary keys and must land in the same buckets.
+statement ok
+INSERT INTO pm.d.timestamp_keys SELECT make_timestamptz(i * 1000000 + 123456) FROM range(1000, 1100) v(i);
+
+statement ok
+INSERT INTO pm.d.timestamp_keys SELECT make_timestamptz(i * 1000000 + 123999) FROM range(1000, 1100) v(i);
+
+query II
+SELECT count(*), count(DISTINCT ts) FROM pm.d.timestamp_keys;
+----
+100	100
+
+query I
+SELECT count(*) FROM pm.d.timestamp_keys WHERE epoch_us(ts) = 1000123000;
+----
+1
+
+statement ok
+DETACH pm;
+
+endloop
+
+statement ok
+RESET TimeZone;
