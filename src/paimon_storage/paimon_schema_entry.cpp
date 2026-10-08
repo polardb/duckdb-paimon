@@ -38,6 +38,7 @@
 #include "paimon_catalog.hpp"
 #include "paimon_schema_entry.hpp"
 #include "paimon_table_set.hpp"
+#include "paimon_type_utils.hpp"
 
 namespace duckdb {
 
@@ -100,7 +101,7 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 	auto col_types = base.columns.GetColumnTypes();
 
 	ArrowSchema arrow_schema {};
-	auto client_props = transaction.GetContext().GetClientProperties();
+	auto client_props = PaimonTypeUtils::GetArrowWriteProperties(transaction.GetContext());
 	ArrowConverter::ToArrowSchema(&arrow_schema, col_types, col_names, client_props);
 	struct ArrowSchemaGuard {
 		ArrowSchema &schema;
