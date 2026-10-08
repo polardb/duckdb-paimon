@@ -25,6 +25,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -42,6 +43,13 @@
 #include "paimon_catalog.hpp"
 #include "paimon_insert.hpp"
 #include "paimon_schema_entry.hpp"
+#include "paimon_type_utils.hpp"
+
+#include "arrow/array.h"
+#include "arrow/c/bridge.h"
+#include "arrow/compute/cast.h"
+#include "arrow/record_batch.h"
+#include "arrow/type.h"
 
 #include <atomic>
 #include <mutex>
@@ -74,6 +82,13 @@ struct PaimonInsertGlobalState : public GlobalSinkState {
 	string temp_directory;
 	idx_t insert_count = 0;
 	bool finished = false;
+	ClientProperties arrow_properties;
+	std::shared_ptr<arrow::Schema> input_schema;
+	std::shared_ptr<arrow::Schema> write_schema;
+	vector<idx_t> cast_columns;
+	std::shared_ptr<arrow::Schema> bucket_input_schema;
+	std::shared_ptr<arrow::Schema> bucket_write_schema;
+	vector<idx_t> bucket_cast_columns;
 
 	vector<string> part_key_names;
 	vector<idx_t> part_col_idxs;
@@ -126,6 +141,11 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 		arrow_schema_result.value()->release = nullptr;
 		ArrowTableSchema arrow_table;
 		ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table, arrow_schema.arrow_schema);
+		auto write_schema_result = arrow::ImportSchema(&arrow_schema.arrow_schema);
+		if (!write_schema_result.ok()) {
+			throw IOException(write_schema_result.status().ToString());
+		}
+		state->write_schema = std::move(write_schema_result).ValueOrDie();
 		state->bucket_info = PaimonBucketInfo::Bind(arrow_table.GetNames(), arrow_table.GetTypes(), part_keys,
 		                                            data_schema->PrimaryKeys(), data_schema->Options());
 		state->bucket_info.CheckWriteSupported();
@@ -140,6 +160,46 @@ unique_ptr<GlobalSinkState> PhysicalPaimonInsert::GetGlobalSinkState(ClientConte
 			}
 		}
 	}
+
+	if (!state->write_schema) {
+		throw IOException("Failed to resolve Paimon write schema");
+	}
+	state->arrow_properties = PaimonTypeUtils::GetArrowWriteProperties(context);
+	ArrowSchemaWrapper export_schema;
+	ArrowConverter::ToArrowSchema(&export_schema.arrow_schema, children[0].get().GetTypes(), table_schema->FieldNames(),
+	                              state->arrow_properties);
+	auto export_schema_result = arrow::ImportSchema(&export_schema.arrow_schema);
+	if (!export_schema_result.ok()) {
+		throw IOException(export_schema_result.status().ToString());
+	}
+	state->input_schema = std::move(export_schema_result).ValueOrDie();
+	if (state->input_schema->num_fields() != state->write_schema->num_fields()) {
+		throw InvalidInputException("Paimon write schema column count does not match input");
+	}
+	for (int i = 0; i < state->input_schema->num_fields(); i++) {
+		auto &source = state->input_schema->field(i)->type();
+		auto &target = state->write_schema->field(i)->type();
+		if (!source->Equals(target)) {
+			if (!arrow::compute::CanCast(*source, *target)) {
+				throw InvalidInputException("Unsupported Paimon write conversion for column \"%s\": Arrow %s to %s",
+				                            state->write_schema->field(i)->name(), source->ToString(),
+				                            target->ToString());
+			}
+			state->cast_columns.push_back(i);
+		}
+	}
+	arrow::FieldVector bucket_input_fields, bucket_write_fields;
+	for (auto column : state->bucket_info.column_ids) {
+		auto &source = state->input_schema->field(column);
+		auto &target = state->write_schema->field(column);
+		if (!source->type()->Equals(target->type())) {
+			state->bucket_cast_columns.push_back(bucket_input_fields.size());
+		}
+		bucket_input_fields.push_back(source);
+		bucket_write_fields.push_back(target);
+	}
+	state->bucket_input_schema = arrow::schema(std::move(bucket_input_fields));
+	state->bucket_write_schema = arrow::schema(std::move(bucket_write_fields));
 
 	if (!part_keys.empty()) {
 		if (!data_schema) {
@@ -199,12 +259,73 @@ unique_ptr<LocalSinkState> PhysicalPaimonInsert::GetLocalSinkState(ExecutionCont
 	return std::move(lstate);
 }
 
-static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataChunk &chunk, ClientContext &client,
+static arrow::Result<std::shared_ptr<arrow::Array>> CastPaimonArray(const std::shared_ptr<arrow::Array> &array,
+                                                                    const std::shared_ptr<arrow::DataType> &target,
+                                                                    const arrow::compute::CastOptions &options) {
+	if (array->type()->Equals(target)) {
+		return array;
+	}
+	// Preserve container buffers and cast their children. Paimon validates actual nulls,
+	// unlike Arrow's struct cast which rejects nullable-to-required field declarations.
+	if (array->type_id() == target->id() && (target->id() == arrow::Type::STRUCT || target->id() == arrow::Type::LIST ||
+	                                         target->id() == arrow::Type::MAP)) {
+		auto data = array->data()->Copy();
+		if (data->child_data.size() != static_cast<size_t>(target->num_fields())) {
+			return arrow::Status::Invalid("Paimon nested write schema field count does not match input");
+		}
+		for (int i = 0; i < target->num_fields(); i++) {
+			auto result = CastPaimonArray(arrow::MakeArray(data->child_data[i]), target->field(i)->type(), options);
+			if (!result.ok()) {
+				return result.status();
+			}
+			data->child_data[i] = std::move(result).ValueOrDie()->data();
+		}
+		data->type = target;
+		return arrow::MakeArray(std::move(data));
+	}
+	return arrow::compute::Cast(*array, target, options);
+}
+
+static void ConvertPaimonArray(ArrowArrayWrapper &arrow_wrapper, const std::shared_ptr<arrow::Schema> &input_schema,
+                               const std::shared_ptr<arrow::Schema> &write_schema, const vector<idx_t> &cast_columns) {
+	if (!cast_columns.empty()) {
+		auto input_result = arrow::ImportRecordBatch(&arrow_wrapper.arrow_array, input_schema);
+		if (!input_result.ok()) {
+			throw IOException(input_result.status().ToString());
+		}
+		auto input = std::move(input_result).ValueOrDie();
+		auto columns = input->columns();
+		auto options = arrow::compute::CastOptions::Safe();
+		// Match paimon-cpp's timestamp precision conversion, while still checking overflow.
+		options.allow_time_truncate = true;
+		for (auto column : cast_columns) {
+			auto &field = write_schema->field(column);
+			auto result = CastPaimonArray(columns[column], field->type(), options);
+			if (!result.ok()) {
+				throw ConversionException("Paimon write conversion failed for column \"%s\": %s", field->name(),
+				                          result.status().ToString());
+			}
+			columns[column] = std::move(result).ValueOrDie();
+		}
+		auto batch = arrow::RecordBatch::Make(write_schema, input->num_rows(), std::move(columns));
+		auto status = batch->Validate();
+		if (!status.ok()) {
+			throw IOException(status.ToString());
+		}
+		status = arrow::ExportRecordBatch(*batch, &arrow_wrapper.arrow_array);
+		if (!status.ok()) {
+			throw IOException(status.ToString());
+		}
+	}
+}
+
+static std::unique_ptr<paimon::RecordBatch> BuildRecordBatchWithPartition(DataChunk &chunk,
+                                                                          PaimonInsertGlobalState &gstate,
                                                                           const std::map<string, string> &partition,
                                                                           int32_t bucket) {
 	ArrowArrayWrapper arrow_wrapper;
-	auto client_props = client.GetClientProperties();
-	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, client_props, {});
+	ArrowConverter::ToArrowArray(chunk, &arrow_wrapper.arrow_array, gstate.arrow_properties, {});
+	ConvertPaimonArray(arrow_wrapper, gstate.input_schema, gstate.write_schema, gstate.cast_columns);
 
 	paimon::RecordBatchBuilder batch_builder(&arrow_wrapper.arrow_array);
 	if (!partition.empty()) {
@@ -232,7 +353,7 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		}
 	}
 	auto write_chunk = [&](DataChunk &data, const std::map<string, string> &partition, int32_t bucket) {
-		auto batch = BuildRecordBatchWithPartition(data, context.client, partition, bucket);
+		auto batch = BuildRecordBatchWithPartition(data, gstate, partition, bucket);
 		if (gstate.bucket_writers.empty()) {
 			auto status = lstate.writer->Write(std::move(batch));
 			if (!status.ok()) {
@@ -268,10 +389,13 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		bucket_keys.ReferenceColumns(chunk, bucket_info.column_ids);
 		ArrowArrayWrapper bucket_array;
 		ArrowSchemaWrapper bucket_schema;
-		auto client_props = context.client.GetClientProperties();
-		ArrowConverter::ToArrowArray(bucket_keys, &bucket_array.arrow_array, client_props, {});
-		ArrowConverter::ToArrowSchema(&bucket_schema.arrow_schema, bucket_info.column_types, bucket_info.column_names,
-		                              client_props);
+		ArrowConverter::ToArrowArray(bucket_keys, &bucket_array.arrow_array, gstate.arrow_properties, {});
+		ConvertPaimonArray(bucket_array, gstate.bucket_input_schema, gstate.bucket_write_schema,
+		                   gstate.bucket_cast_columns);
+		auto export_status = arrow::ExportSchema(*gstate.bucket_write_schema, &bucket_schema.arrow_schema);
+		if (!export_status.ok()) {
+			throw IOException(export_status.ToString());
+		}
 		auto status = lstate.bucket_calculator->CalculateBucketIds(&bucket_array.arrow_array,
 		                                                           &bucket_schema.arrow_schema, bucket_ids.data());
 		if (!status.ok()) {
