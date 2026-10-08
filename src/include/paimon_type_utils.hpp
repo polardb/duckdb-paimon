@@ -36,6 +36,8 @@ namespace duckdb {
 /// Utility class for converting between DuckDB types and paimon types.
 class PaimonTypeUtils {
 public:
+	static ClientProperties GetArrowWriteProperties(ClientContext &context);
+
 	/// Convert a DuckDB LogicalType to the corresponding paimon FieldType.
 	/// Returns FieldType::UNKNOWN for unsupported types.
 	static paimon::FieldType ConvertFieldType(const LogicalType &type);

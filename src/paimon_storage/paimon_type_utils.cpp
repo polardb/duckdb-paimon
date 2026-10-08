@@ -23,11 +23,19 @@
  */
 
 #include "paimon_type_utils.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_properties.hpp"
 
 #include "paimon/data/decimal.h"
 #include "paimon/data/timestamp.h"
 
 namespace duckdb {
+
+ClientProperties PaimonTypeUtils::GetArrowWriteProperties(ClientContext &context) {
+	auto properties = context.GetClientProperties();
+	return ClientProperties(properties.time_zone, ArrowOffsetSize::REGULAR, false, false, false,
+	                        ArrowFormatVersion::V1_0, properties.client_context);
+}
 
 paimon::FieldType PaimonTypeUtils::ConvertFieldType(const LogicalType &type) {
 	switch (type.id()) {

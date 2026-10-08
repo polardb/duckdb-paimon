@@ -1,0 +1,229 @@
+# name: test/sql/paimon_arrow_write.test
+# group: [sql]
+
+require paimon
+
+statement ok
+CREATE TEMP TABLE expected (
+    id INTEGER, s VARCHAR, bytes BLOB, small DECIMAL(8,2), medium DECIMAL(18,4), big DECIMAL(38,6),
+    strings VARCHAR[], decimals DECIMAL(8,2)[], r STRUCT(s VARCHAR, b BLOB, d DECIMAL(18,4)),
+    m MAP(VARCHAR, DECIMAL(8,2)[]), flag BOOLEAN, i8 TINYINT, i16 SMALLINT, i64 BIGINT,
+    f FLOAT, d DOUBLE, day DATE, ts_s TIMESTAMP_S, ts_ms TIMESTAMP_MS, ts_us TIMESTAMP, ts_ns TIMESTAMP_NS
+);
+
+statement ok
+INSERT INTO expected VALUES
+    (1, 'a long string to exercise non-inline buffers', from_hex('0001ff'), 12345.67, 1234567890.1234, 123456789012345678901234567890.123456,
+     ['a long nested string', '', NULL], [12345.67, NULL], {'s': 'nested', 'b': from_hex('00ff'), 'd': -1234567890.1234},
+     MAP {'key': [12345.67, NULL]}, true, -128, -32768, -9223372036854775808,
+     1.25, -2.5, DATE '1969-12-31', TIMESTAMP_S '1969-12-31 23:59:58', TIMESTAMP_MS '1969-12-31 23:59:58.765',
+     TIMESTAMP '1969-12-31 23:59:58.765432', TIMESTAMP_NS '1969-12-31 23:59:58.765432110'),
+    (2, '', ''::BLOB, 0, 0, 0, [], [], {'s': '', 'b': ''::BLOB, 'd': 0}, MAP {}, false, 0, 0, 0,
+     0, 0, DATE '1970-01-01', TIMESTAMP_S '1970-01-01', TIMESTAMP_MS '1970-01-01', TIMESTAMP '1970-01-01', TIMESTAMP_NS '1970-01-01');
+
+statement ok
+INSERT INTO expected (id) VALUES (3);
+
+foreach format parquet orc
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_writes_${format}' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm.d;
+
+# SQL BLOB creates Paimon BYTES. Install a schema with both BYTES and real BLOB fields.
+statement ok
+CREATE TABLE pm.d.blobs (id INTEGER);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT $${
+  "version": 3,
+  "id": 0,
+  "fields": [
+    {"id": 0, "name": "id", "type": "INT"},
+    {"id": 1, "name": "s", "type": "STRING"},
+    {"id": 2, "name": "bytes", "type": "BYTES"},
+    {"id": 3, "name": "b", "type": "BLOB"},
+    {"id": 4, "name": "b2", "type": "BLOB"}
+  ],
+  "highestFieldId": 4,
+  "partitionKeys": [],
+  "primaryKeys": [],
+  "options": {
+    "file.format": "${format}",
+    "manifest.format": "avro",
+    "data-evolution.enabled": "true",
+    "row-tracking.enabled": "true"
+  },
+  "timeMillis": 0
+}$$) TO '__TEST_DIR__/arrow_writes_${format}/d.db/blobs/schema/schema-0' (HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_writes_${format}' AS pm (TYPE paimon);
+
+# A single non-NULL BLOB used to crash or fail a boundary check.
+statement ok
+INSERT INTO pm.d.blobs VALUES (0, 'new', from_hex('0001ff'), from_hex('0001ff'), NULL);
+
+# These settings affect query exports, not the layout of Paimon writes.
+foreach version 1.0 1.4 1.5
+
+foreach large false true
+
+foreach views false true
+
+statement ok
+SET arrow_output_version = '${version}';
+
+statement ok
+SET arrow_large_buffer_size = ${large};
+
+statement ok
+SET produce_arrow_string_view = ${views};
+
+statement ok
+SET arrow_output_list_view = ${views};
+
+statement ok
+SET arrow_lossless_conversion = ${views};
+
+statement ok
+INSERT INTO pm.d.blobs VALUES
+    (1, 'new', from_hex('0001ff'), from_hex('0001ff'), 'long blob payload'::BLOB),
+    (2, 'null', from_hex('00'), NULL, from_hex('ff')),
+    (3, 'empty', ''::BLOB, ''::BLOB, NULL),
+    (4, NULL, NULL, NULL, ''::BLOB);
+
+query ITTTT
+SELECT DISTINCT id, s, '0x' || hex(bytes), '0x' || hex(b), '0x' || hex(b2) FROM pm.d.blobs ORDER BY id;
+----
+0	new	0x0001FF	0x0001FF	NULL
+1	new	0x0001FF	0x0001FF	0x6C6F6E6720626C6F62207061796C6F6164
+2	null	0x00	NULL	0xFF
+3	empty	0x	0x	NULL
+4	NULL	NULL	NULL	0x
+
+# CTAS and later INSERT must use the same stable schema despite export settings.
+# DuckDB 1.4 CTAS uses the default file format; table options require schema fixtures.
+statement ok
+CREATE TABLE pm.d."typed_${version}_${large}_${views}" AS SELECT * FROM expected;
+
+statement ok
+INSERT INTO pm.d."typed_${version}_${large}_${views}" SELECT * FROM expected;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM pm.d."typed_${version}_${large}_${views}" EXCEPT ALL (SELECT * FROM expected UNION ALL SELECT * FROM expected))
+    UNION ALL
+    ((SELECT * FROM expected UNION ALL SELECT * FROM expected) EXCEPT ALL SELECT * FROM pm.d."typed_${version}_${large}_${views}")
+) differences;
+----
+0
+
+statement ok
+DROP TABLE pm.d."typed_${version}_${large}_${views}";
+
+endloop
+
+endloop
+
+endloop
+
+query I
+SELECT count(*) FROM pm.d.blobs;
+----
+49
+
+statement ok
+RESET arrow_output_version;
+
+statement ok
+RESET arrow_large_buffer_size;
+
+statement ok
+RESET produce_arrow_string_view;
+
+statement ok
+RESET arrow_output_list_view;
+
+statement ok
+RESET arrow_lossless_conversion;
+
+# Bucket calculation exports both arrays and schemas under these settings too.
+statement ok
+SET arrow_large_buffer_size = true;
+
+statement ok
+SET arrow_output_version = '1.5';
+
+statement ok
+SET produce_arrow_string_view = true;
+
+statement ok
+CREATE TABLE pm.d.bucketed (id INTEGER);
+
+statement ok
+DETACH pm;
+
+statement ok
+COPY (SELECT $${
+  "version": 3, "id": 0,
+  "fields": [
+    {"id": 0, "name": "id", "type": "INT NOT NULL"},
+    {"id": 1, "name": "s", "type": "STRING NOT NULL"},
+    {"id": 2, "name": "d", "type": "DECIMAL(8,2) NOT NULL"},
+    {"id": 3, "name": "b", "type": "BYTES NOT NULL"}
+  ],
+  "highestFieldId": 3, "partitionKeys": [], "primaryKeys": ["id", "s", "d", "b"],
+  "options": {"bucket": "4", "bucket-key": "s,d,b", "bucket-function.type": "hive", "file.format": "${format}"},
+  "timeMillis": 0
+}$$) TO '__TEST_DIR__/arrow_writes_${format}/d.db/bucketed/schema/schema-0' (HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_writes_${format}' AS pm (TYPE paimon);
+
+statement ok
+INSERT INTO pm.d.bucketed VALUES (1, 'key', 12345.67, from_hex('00ff'));
+
+statement ok
+RESET arrow_large_buffer_size;
+
+statement ok
+RESET arrow_output_version;
+
+statement ok
+RESET produce_arrow_string_view;
+
+statement ok
+INSERT INTO pm.d.bucketed VALUES (1, 'key', 12345.67, from_hex('00ff'));
+
+query I
+SELECT count(*) FROM pm.d.bucketed;
+----
+1
+
+# Multiple batches and reordered input columns exercise buffer ownership and column mapping.
+statement ok
+INSERT INTO pm.d.blobs (b2, b, bytes, s, id)
+SELECT encode('payload_' || i), from_hex('0001ff'), from_hex('ff00'), 'row_' || i, i
+FROM range(1000, 6000) r(i);
+
+statement ok
+DETACH pm;
+
+statement ok
+ATTACH '__TEST_DIR__/arrow_writes_${format}' AS pm (TYPE paimon);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE s = 'row_' || id AND bytes = from_hex('ff00') AND b = from_hex('0001ff') AND b2 = encode('payload_' || id)) FROM pm.d.blobs WHERE id >= 1000;
+----
+5000	5000
+
+statement ok
+DETACH pm;
+
+endloop
