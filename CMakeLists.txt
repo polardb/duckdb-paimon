@@ -204,6 +204,22 @@ endif()
 list(APPEND PAIMON_CPP_LIBS ${PAIMON_CPP_SYSTEM_LIBS})
 target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
+
+if(BUILD_UNITTESTS)
+  add_executable(paimon_snapshot_binding_test test/cpp/paimon_snapshot_binding.cpp)
+  target_link_libraries(paimon_snapshot_binding_test duckdb_static ${EXTENSION_NAME})
+  link_extension_libraries(paimon_snapshot_binding_test "")
+  add_custom_target(paimon_check_snapshot_binding
+    COMMAND ${CMAKE_COMMAND}
+      "-DTEST_BINARY=$<TARGET_FILE:paimon_snapshot_binding_test>"
+      "-DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/data"
+      "-DSCHEMA_FIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/fixtures"
+      "-DNATIVE_FIXTURE_DIR=${PAIMON_CPP_SOURCE_DIR}/test/test_data"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/binding-test-work"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+    DEPENDS paimon_snapshot_binding_test
+    USES_TERMINAL)
+endif()
 if(APPLE)
   target_link_options(${EXTENSION_NAME} PUBLIC "SHELL:-framework Security"
                       "SHELL:-framework CoreFoundation" "SHELL:-framework Network")

@@ -29,6 +29,7 @@
 #include "paimon/schema/schema.h"
 
 #include "paimon_catalog.hpp"
+#include "paimon_functions.hpp"
 #include "paimon_schema_entry.hpp"
 #include "paimon_table_entry.hpp"
 #include "paimon_table_set.hpp"
@@ -93,6 +94,11 @@ optional_ptr<CatalogEntry> PaimonTableSet::BuildEntry(ClientContext &context, co
 	}
 
 	auto table_entry = make_uniq<PaimonTableEntry>(catalog, schema, table_info);
+	auto json = table_schema->GetJsonSchema();
+	if (!json.ok()) {
+		throw IOException(json.status().ToString());
+	}
+	table_entry->schema_signature = PaimonFunctions::GetColumnSignature(json.value());
 	auto [iter, inserted] = entries.emplace(make_pair(table_name, std::move(table_entry)));
 
 	return iter->second.get();
