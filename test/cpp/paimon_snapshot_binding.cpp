@@ -41,6 +41,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 using namespace duckdb;
@@ -222,12 +223,36 @@ struct BindingFixture {
 	}
 };
 
-TEST_CASE_METHOD(BindingFixture, "Paimon binding: bind_error", "[paimon][snapshot_binding]") {
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: hidden manifests", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto selector = GENERATE("", "'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'",
+	                               "'scan.timestamp'='2099-01-01'");
+	CAPTURE(static_cast<int>(entry), selector, warehouse);
+	auto options = string(selector).empty() ? "" : " WITH (" + string(selector) + ")";
+	SQL(writer, "CREATE TABLE pm.race.hidden (id INTEGER, value INTEGER)" + options);
+	SQL(writer, "INSERT INTO pm.race.hidden VALUES (1,10)");
+	std::filesystem::rename(warehouse + "/race.db/hidden/manifest", warehouse + "/hidden-manifest");
+	auto bound = Bind(reader, warehouse, entry, "hidden");
+	REQUIRE_THROWS_WITH(Count(reader, bound), Catch::Contains("Not exist"));
+	REQUIRE_THROWS_WITH(Read(reader, bound), Catch::Contains("Not exist"));
+	SQL(reader, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: corrupt snapshot metadata", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	CAPTURE(static_cast<int>(entry), warehouse);
 	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
-	std::filesystem::rename(warehouse + "/race.db/t/manifest", warehouse + "/hidden-manifest");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry), Catch::Contains("Not exist"));
+	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20)");
+	// ListSnapshots reads retained history, not just the newest snapshot.
+	const auto path = warehouse + "/race.db/t/snapshot/snapshot-1";
+	REQUIRE(std::filesystem::exists(path));
+	{
+		std::ofstream corrupt(path, std::ios::trunc);
+		corrupt << "not valid snapshot JSON";
+		corrupt.close();
+		REQUIRE_FALSE(corrupt.fail());
+	}
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry), Catch::Contains("deserialize failed"));
 	SQL(reader, "SELECT 42");
 }
 
@@ -236,6 +261,16 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: mode", "[paimon][snapshot_bind
 	CAPTURE(static_cast<int>(entry), warehouse);
 	SQL(writer, "CREATE TABLE pm.race.mode (id INTEGER) WITH ('scan.mode'='latest','scan.snapshot-id'='1')");
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "mode"), Catch::Contains("scan.mode conflicts"));
+	const auto missing = GENERATE("from-snapshot", "from-snapshot-full", "from-timestamp");
+	SQL(writer, "CREATE TABLE pm.race.missing_selector (id INTEGER) WITH ('scan.mode'='" + string(missing) + "')");
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_selector"), Catch::Contains("requires a matching"));
+	if (entry != Entry::CATALOG) {
+		SQL(writer, "CREATE TABLE pm.race.conflicting_time (id INTEGER) WITH ('scan.timestamp'='2099-01-01')");
+		named_parameter_map_t parameters;
+		parameters["snapshot_from_timestamp"] = Value("2099-01-01").DefaultCastAs(LogicalType::TIMESTAMP);
+		REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "conflicting_time", parameters),
+		                    Catch::Contains("cannot be set at the same time"));
+	}
 	SQL(reader, "SELECT 42");
 }
 
@@ -538,5 +573,25 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: timestamp", "[paimon][snapshot
 	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
 	auto fresh = Bind(reader, warehouse, entry, "t", parameters);
 	ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}});
+	SQL(reader, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: retained table selectors", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto selector =
+	    GENERATE("'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'", "'scan.timestamp'='2099-01-01'");
+	CAPTURE(static_cast<int>(entry), selector, warehouse);
+	SQL(writer, "CREATE TABLE pm.race.selected (id INTEGER, value INTEGER) WITH (" + string(selector) + ")");
+	SQL(writer, "INSERT INTO pm.race.selected VALUES (1,10)");
+	auto bound = Bind(reader, warehouse, entry, "selected");
+	SQL(writer, "INSERT INTO pm.race.selected VALUES (2,20)");
+	REQUIRE(Count(reader, bound) == 1);
+	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
+	auto fresh = Bind(reader, warehouse, entry, "selected");
+	if (string(selector).find("scan.snapshot-id") != string::npos) {
+		ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}});
+	} else {
+		ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}});
+	}
 	SQL(reader, "SELECT 42");
 }

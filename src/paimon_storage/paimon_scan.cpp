@@ -38,6 +38,7 @@
 #include "paimon_catalog.hpp"
 #include "paimon_functions.hpp"
 #include "paimon_type_utils.hpp"
+#include "paimon_snapshot_resolver.hpp"
 
 #include "paimon/api.h"
 #include "paimon/catalog/identifier.h"
@@ -46,7 +47,6 @@
 #include "paimon/schema/schema.h"
 
 #include <string>
-#include <charconv>
 
 namespace duckdb {
 
@@ -640,10 +640,10 @@ static void PaimonPushdownFilter(ClientContext &context, LogicalGet &get, Functi
 	}
 }
 
-static paimon::Result<std::shared_ptr<paimon::Plan>>
-CreatePaimonPlan(const string &path, const string &schema, const map<string, string> &options,
-                 const std::shared_ptr<paimon::Predicate> &predicate = nullptr,
-                 const std::vector<std::map<std::string, std::string>> &part_filters = {}) {
+static paimon::Result<std::unique_ptr<paimon::TableScan>>
+CreatePaimonScanner(const string &path, const string &schema, const map<string, string> &options,
+                    const std::shared_ptr<paimon::Predicate> &predicate = nullptr,
+                    const std::vector<std::map<std::string, std::string>> &part_filters = {}) {
 	paimon::ScanContextBuilder builder(path);
 	builder.SetOptions(options).SetTableSchema(schema).SetPredicate(predicate);
 	if (!part_filters.empty()) {
@@ -653,7 +653,14 @@ CreatePaimonPlan(const string &path, const string &schema, const map<string, str
 	if (!context.ok()) {
 		return context.status();
 	}
-	auto scanner = paimon::TableScan::Create(std::move(context).value());
+	return paimon::TableScan::Create(std::move(context).value());
+}
+
+static paimon::Result<std::shared_ptr<paimon::Plan>>
+CreatePaimonPlan(const string &path, const string &schema, const map<string, string> &options,
+                 const std::shared_ptr<paimon::Predicate> &predicate = nullptr,
+                 const std::vector<std::map<std::string, std::string>> &part_filters = {}) {
+	auto scanner = CreatePaimonScanner(path, schema, options, predicate, part_filters);
 	if (!scanner.ok()) {
 		return scanner.status();
 	}
@@ -685,7 +692,12 @@ static map<string, string> ResolvePaimonOptions(const paimon::DataSchema &schema
 		throw BinderException("Unsupported Paimon scan mode for snapshot binding");
 	}
 	const bool has_id = options.count("scan.snapshot-id");
-	const bool has_time = options.count("scan.timestamp-millis") || options.count("scan.timestamp");
+	const auto time_string = options.find("scan.timestamp");
+	const bool has_time_string = time_string != options.end() && !time_string->second.empty();
+	const bool has_time = options.count("scan.timestamp-millis") || has_time_string;
+	if (options.count("scan.timestamp-millis") && has_time_string) {
+		throw BinderException("scan.timestamp-millis and scan.timestamp cannot be set at the same time");
+	}
 	if (has_id && has_time) {
 		throw BinderException("Paimon scan cannot combine snapshot and timestamp selectors, including table options");
 	}
@@ -693,6 +705,10 @@ static map<string, string> ResolvePaimonOptions(const paimon::DataSchema &schema
 	if (mode_name != "default" && ((has_id && mode_name != "from-snapshot" && mode_name != "from-snapshot-full") ||
 	                               (has_time && mode_name != "from-timestamp"))) {
 		throw BinderException("Paimon scan.mode conflicts with the effective snapshot or timestamp selector");
+	}
+	if (((mode_name == "from-snapshot" || mode_name == "from-snapshot-full") && !has_id) ||
+	    (mode_name == "from-timestamp" && !has_time)) {
+		throw BinderException("Paimon scan.mode requires a matching snapshot or timestamp selector");
 	}
 	if (mode_name == "default" && has_id) {
 		options["scan.mode"] = "from-snapshot-full";
@@ -778,34 +794,46 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		read->read_schema_id = data_schema->Id();
 		read->options = ResolvePaimonOptions(*data_schema, bind_data->paimon_options);
 		const auto requested_id = read->options.find("scan.snapshot-id");
-		const bool explicit_selector = requested_id != read->options.end() ||
-		                               read->options.count("scan.timestamp-millis") ||
-		                               read->options.count("scan.timestamp");
-		int64_t requested_snapshot = 0;
+		const auto millis = read->options.find("scan.timestamp-millis");
+		const auto time_string = read->options.find("scan.timestamp");
+		std::optional<int64_t> requested_snapshot;
+		std::optional<int64_t> timestamp;
 		if (requested_id != read->options.end()) {
-			const auto &text = requested_id->second;
-			auto parsed = std::from_chars(text.data(), text.data() + text.size(), requested_snapshot);
-			if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size()) {
-				throw BinderException("Invalid Paimon scan.snapshot-id: expected a signed 64-bit integer");
+			auto parsed = PaimonSnapshotResolver::ParseInteger(requested_id->second, "scan.snapshot-id");
+			if (!parsed.ok()) {
+				throw BinderException(parsed.status().ToString());
 			}
+			requested_snapshot = parsed.value();
 		}
-		auto plan = CreatePaimonPlan(read->table_data_path, read->table_schema_json, read->options);
-		if (!plan.ok()) {
-			// Metadata-only binding may describe an unsupported reader. Never
-			// defer I/O, invalid selectors, or an explicitly requested version.
-			if (!plan.status().IsNotImplemented() || explicit_selector) {
-				throw IOException(plan.status().ToString());
+		if (millis != read->options.end() || (time_string != read->options.end() && !time_string->second.empty())) {
+			auto parsed = millis != read->options.end()
+			                  ? PaimonSnapshotResolver::ParseInteger(millis->second, "scan.timestamp-millis")
+			                  : PaimonSnapshotResolver::ParseTimestamp(time_string->second);
+			if (!parsed.ok()) {
+				throw BinderException(parsed.status().ToString());
 			}
-			read->deferred_error = plan.status();
-		} else {
-			read->snapshot_id = plan.value()->SnapshotId();
-			if (!read->snapshot_id && (explicit_selector || !plan.value()->Splits().empty())) {
-				throw BinderException("Paimon requested version did not resolve to a snapshot");
-			}
-			if (requested_id != read->options.end() && requested_snapshot != *read->snapshot_id) {
-				throw BinderException("Paimon resolved snapshot does not match the requested snapshot");
-			}
+			timestamp = parsed.value();
 		}
+		// Validate native options/read capability without opening manifests or
+		// planning splits. Unsupported empty readers must not become empty success.
+		auto scanner = CreatePaimonScanner(read->table_data_path, read->table_schema_json, read->options);
+		if (!scanner.ok()) {
+			if (!scanner.status().IsNotImplemented() || requested_snapshot || timestamp) {
+				throw IOException(scanner.status().ToString());
+			}
+			read->deferred_error = scanner.status();
+		}
+		auto snapshots =
+		    PaimonSnapshotResolver::ListWithRetry([&]() { return paimon_catalog->ListSnapshots(table_identifier); });
+		if (!snapshots.ok()) {
+			throw IOException(snapshots.status().ToString());
+		}
+		auto selected =
+		    PaimonSnapshotResolver::Resolve(snapshots.value(), requested_snapshot, timestamp, read->read_schema_id);
+		if (!selected.ok()) {
+			throw BinderException(selected.status().ToString());
+		}
+		read->snapshot_id = selected.value();
 		auto checked_schema = paimon_catalog->LoadTableSchema(table_identifier);
 		auto checked_path = paimon_catalog->GetTableLocation(table_identifier);
 		if (!checked_schema.ok() || !checked_schema.value() || !checked_path.ok()) {

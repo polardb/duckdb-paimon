@@ -207,10 +207,12 @@ target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 
 if(BUILD_UNITTESTS)
   add_executable(unittest_paimon EXCLUDE_FROM_ALL test/cpp/main.cpp
-                 test/cpp/paimon_snapshot_binding.cpp)
+                 test/cpp/paimon_snapshot_binding.cpp
+                 test/cpp/paimon_snapshot_resolver.cpp)
   target_include_directories(unittest_paimon PRIVATE
                              ${CMAKE_SOURCE_DIR}/third_party/catch
                              ${CMAKE_SOURCE_DIR}/test/include)
+  target_include_directories(unittest_paimon SYSTEM PRIVATE ${PAIMON_CPP_INCLUDE})
   target_compile_definitions(unittest_paimon PRIVATE
     PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
     PAIMON_SCHEMA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/fixtures"
