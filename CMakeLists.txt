@@ -207,8 +207,15 @@ target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 
 if(BUILD_UNITTESTS)
   add_executable(unittest_paimon EXCLUDE_FROM_ALL test/cpp/main.cpp
+                 test/cpp/paimon_read_target.cpp
                  test/cpp/paimon_snapshot_binding.cpp
                  test/cpp/paimon_snapshot_resolver.cpp)
+  target_compile_definitions(unittest_paimon PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
+  if(PAIMON_ENABLE_REST)
+    target_sources(unittest_paimon PRIVATE test/cpp/paimon_rest_branch.cpp)
+    target_include_directories(unittest_paimon SYSTEM PRIVATE
+                               ${CMAKE_SOURCE_DIR}/third_party/httplib)
+  endif()
   target_include_directories(unittest_paimon PRIVATE
                              ${CMAKE_SOURCE_DIR}/third_party/catch
                              ${CMAKE_SOURCE_DIR}/test/include)

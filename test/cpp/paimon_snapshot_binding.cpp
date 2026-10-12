@@ -35,6 +35,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "catch.hpp"
+#include "yyjson.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -43,6 +44,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
 
 using namespace duckdb;
 
@@ -223,6 +226,191 @@ struct BindingFixture {
 	}
 };
 
+// Branches share data and manifests at the table root; only metadata is copied.
+static string CopyBranch(const string &path, const string &branch = "dev") {
+	const auto destination = path + "/branch/branch-" + branch;
+	REQUIRE(std::filesystem::create_directories(destination));
+	std::filesystem::copy(path + "/schema", destination + "/schema", std::filesystem::copy_options::recursive);
+	if (std::filesystem::exists(path + "/snapshot")) {
+		std::filesystem::copy(path + "/snapshot", destination + "/snapshot", std::filesystem::copy_options::recursive);
+	}
+	return destination;
+}
+
+static void SetSchemaOption(const string &path, const string &key, const string &value) {
+	using namespace duckdb_yyjson;
+	std::ifstream input(path);
+	REQUIRE(input.good());
+	const string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> source(yyjson_read(json.data(), json.size(), 0),
+	                                                               yyjson_doc_free);
+	REQUIRE(source);
+	std::unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)> doc(yyjson_doc_mut_copy(source.get(), nullptr),
+	                                                                    yyjson_mut_doc_free);
+	REQUIRE(doc);
+	auto options = yyjson_mut_obj_get(yyjson_mut_doc_get_root(doc.get()), "options");
+	REQUIRE(yyjson_mut_is_obj(options));
+	REQUIRE(yyjson_mut_obj_put(options, yyjson_mut_strcpy(doc.get(), key.c_str()),
+	                           yyjson_mut_strcpy(doc.get(), value.c_str())));
+	size_t length;
+	std::unique_ptr<char, decltype(&std::free)> output(yyjson_mut_write(doc.get(), 0, &length), std::free);
+	REQUIRE(output);
+	std::ofstream file(path, std::ios::trunc);
+	file.write(output.get(), length);
+	file.close();
+	REQUIRE_FALSE(file.fail());
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: main branch options", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto options = GENERATE("", "'branch'='main'", "'branch'=''", "'branch'=' \t\r\n '",
+	                              "'scan.fallback-branch'=''", "'scan.fallback-branch'=' \t\r\n '");
+	CAPTURE(static_cast<int>(entry), options, warehouse);
+	SQL(writer, "CREATE TABLE pm.race.main_options (id INTEGER, value INTEGER)" +
+	                (string(options).empty() ? "" : " WITH (" + string(options) + ")"));
+	SQL(writer, "INSERT INTO pm.race.main_options VALUES (1,10),(2,20)");
+	for (const auto &table : {"main_options", "main_options$branch_main"}) {
+		auto bound = Bind(reader, warehouse, entry, table);
+		REQUIRE(Count(reader, bound) == 2);
+		ExpectRows(Read(reader, bound), {{Value(1), Value(10)}, {Value(2), Value(20)}});
+	}
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch snapshots", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto option_selected = GENERATE(false, true);
+	CAPTURE(static_cast<int>(entry), option_selected, warehouse);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	const auto path = warehouse + "/race.db/t";
+	const auto branch = CopyBranch(path);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20),(3,30)");
+	if (option_selected) {
+		SetSchemaOption(path + "/schema/schema-0", "branch", "dev");
+	}
+	const string table = option_selected ? "t" : "t$branch_dev";
+	auto bound = Bind(reader, warehouse, entry, table);
+	REQUIRE(Count(reader, bound) == 1);
+	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
+	auto main = Bind(reader, warehouse, entry, "t$branch_main");
+	REQUIRE(Count(reader, main) == 3);
+	ExpectRows(Read(reader, main), {{Value(1), Value(10)}, {Value(2), Value(20)}, {Value(3), Value(30)}});
+
+	// Publish a genuine later snapshot on dev without using a branch writer.
+	std::filesystem::copy(path + "/snapshot", branch + "/snapshot",
+	                      std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
+	REQUIRE(Count(reader, bound) == 1);
+	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
+	auto fresh = Bind(reader, warehouse, entry, table);
+	REQUIRE(Count(reader, fresh) == 3);
+	ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}, {Value(3), Value(30)}});
+
+	// Main still has snapshot 1: expiry on dev must not fall back to it.
+	REQUIRE(std::filesystem::remove(branch + "/snapshot/snapshot-1"));
+	REQUIRE_THROWS_WITH(Count(reader, bound), Catch::Contains("snapshot"));
+	REQUIRE_THROWS_WITH(Read(reader, bound), Catch::Contains("snapshot"));
+	SQL(reader, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch historical schema", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	CAPTURE(static_cast<int>(entry), warehouse);
+	const auto path = warehouse + "/race.db/branch_history";
+	std::filesystem::copy(fixtures + "/schema_evolution.db/mixed_types", path,
+	                      std::filesystem::copy_options::recursive);
+	CopyBranch(path);
+	// Data files use schema 0 while both branches bind schema 1. Only dev
+	// retains the historical schema required to map the stored columns.
+	std::filesystem::rename(path + "/schema/schema-0", warehouse + "/hidden-main-schema-0");
+	auto dev = Bind(reader, warehouse, entry, "branch_history$branch_dev");
+	REQUIRE(dev.names == vector<string> {"old", "id", "discard"});
+	REQUIRE(Count(reader, dev) == 1);
+	ExpectRows(Read(reader, dev), {{Value("before"), Value(1), Value::BIGINT(10)}});
+	// Prove the fixture actually requires historical schema lookup. The latest
+	// main schema is still valid, so binding succeeds but execution must fail.
+	auto main = Bind(reader, warehouse, entry, "branch_history$branch_main");
+	REQUIRE_THROWS_WITH(Read(reader, main), Catch::Contains("Not exist"));
+	ExpectRows(Read(reader, dev), {{Value("before"), Value(1), Value::BIGINT(10)}});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: empty branch", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	CAPTURE(static_cast<int>(entry), warehouse);
+	const auto path = warehouse + "/race.db/t";
+	const auto branch = CopyBranch(path);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10),(2,20)");
+	auto empty = Bind(reader, warehouse, entry, "t$branch_dev");
+	REQUIRE(Count(reader, empty) == 0);
+	ExpectRows(Read(reader, empty), {});
+	std::filesystem::copy(path + "/snapshot", branch + "/snapshot", std::filesystem::copy_options::recursive);
+	REQUIRE(Count(reader, empty) == 0);
+	ExpectRows(Read(reader, empty), {});
+	auto fresh = Bind(reader, warehouse, entry, "t$branch_dev");
+	REQUIRE(Count(reader, fresh) == 2);
+	ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch selectors", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto selector =
+	    GENERATE("'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'", "'scan.timestamp'='2099-01-01'");
+	CAPTURE(static_cast<int>(entry), selector, warehouse);
+	SQL(writer, "CREATE TABLE pm.race.selected_branch (id INTEGER, value INTEGER) WITH (" + string(selector) + ")");
+	SQL(writer, "INSERT INTO pm.race.selected_branch VALUES (1,10)");
+	CopyBranch(warehouse + "/race.db/selected_branch");
+	SQL(writer, "INSERT INTO pm.race.selected_branch VALUES (2,20)");
+	auto bound = Bind(reader, warehouse, entry, "selected_branch$branch_dev");
+	REQUIRE(Count(reader, bound) == 1);
+	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch selector overrides", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART);
+	CAPTURE(static_cast<int>(entry), warehouse);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	CopyBranch(warehouse + "/race.db/t");
+	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20)");
+	named_parameter_map_t parameters;
+	parameters["snapshot_from_id"] = Value::BIGINT(1);
+	auto historical = Bind(reader, warehouse, entry, "t$branch_dev", parameters);
+	REQUIRE(Count(reader, historical) == 1);
+	ExpectRows(Read(reader, historical), {{Value(1), Value(10)}});
+	parameters["snapshot_from_id"] = Value::BIGINT(2);
+	// Snapshot 2 exists on main only, with no table selector to cause a conflict.
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_dev", parameters), Catch::Contains("snapshot"));
+	parameters.clear();
+	parameters["snapshot_from_timestamp"] = Value("2099-01-01").DefaultCastAs(LogicalType::TIMESTAMP);
+	auto timestamp = Bind(reader, warehouse, entry, "t$branch_dev", parameters);
+	REQUIRE(Count(reader, timestamp) == 1);
+	ExpectRows(Read(reader, timestamp), {{Value(1), Value(10)}});
+	parameters["snapshot_from_timestamp"] = Value("1900-01-01").DefaultCastAs(LogicalType::TIMESTAMP);
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_dev", parameters), Catch::Contains("snapshot"));
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon binding: missing branch and fallback", "[paimon][snapshot_binding]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	CAPTURE(static_cast<int>(entry), warehouse);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	CopyBranch(warehouse + "/race.db/t");
+	// The filesystem catalog currently loads main's schema for a missing branch;
+	// the branch-aware native scanner then rejects it. This must not become
+	// an empty/main read, regardless of the scan entrypoint.
+	const auto missing = Catch::Contains("not found latest schema");
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_missing"), missing);
+	// Nonempty names are not trimmed to an existing branch.
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_ dev "), missing);
+	SetSchemaOption(warehouse + "/race.db/t/schema/schema-0", "branch", " dev ");
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t"), missing);
+	auto main = Bind(reader, warehouse, entry, "t$branch_main");
+	REQUIRE(Count(reader, main) == 1);
+	ExpectRows(Read(reader, main), {{Value(1), Value(10)}});
+	SQL(writer, "CREATE TABLE pm.race.missing_option (id INTEGER) WITH ('branch'='missing')");
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_option"), missing);
+	SQL(writer, "CREATE TABLE pm.race.fallback (id INTEGER) WITH ('scan.fallback-branch'='main')");
+	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "fallback"),
+	                    Catch::Contains("does not support a non-empty scan.fallback-branch"));
+	SQL(reader, "SELECT 42");
+}
+
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: hidden manifests", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	const auto selector = GENERATE("", "'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'",
@@ -379,14 +567,6 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: metadata", "[paimon][snapshot_
 	auto fresh = Bind(reader, warehouse, entry, "metadata");
 	ExpectRows(Read(reader, fresh), before);
 	ExpectRows(Read(reader, bound), before);
-	SQL(reader, "SELECT 42");
-}
-
-TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch", "[paimon][snapshot_binding]") {
-	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
-	CAPTURE(static_cast<int>(entry), warehouse);
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_audit"),
-	                    Catch::Contains("supports only the default branch"));
 	SQL(reader, "SELECT 42");
 }
 

@@ -30,6 +30,7 @@
 
 #include "paimon_catalog.hpp"
 #include "paimon_functions.hpp"
+#include "paimon_read_target.hpp"
 #include "paimon_schema_entry.hpp"
 #include "paimon_table_entry.hpp"
 #include "paimon_table_set.hpp"
@@ -48,7 +49,15 @@ optional_ptr<CatalogEntry> PaimonTableSet::BuildEntry(ClientContext &context, co
 	auto &catalog = schema.ParentCatalog().Cast<PaimonCatalog>();
 	auto &paimon_catalog = catalog.GetPaimonCatalog();
 
-	auto table_schema_result = paimon_catalog.LoadTableSchema(paimon::Identifier(schema.name, table_name));
+	auto options = PaimonCatalog::GetPaimonOptions(context, catalog.GetPath(), catalog.GetAttachOptions());
+	auto target = PaimonReadTarget::Load(paimon_catalog, paimon::Identifier(schema.name, table_name), options);
+	paimon::Result<std::shared_ptr<paimon::Schema>> table_schema_result =
+	    target.ok() ? paimon::Result<std::shared_ptr<paimon::Schema>>(target.value().schema) : target.status();
+	if (!table_schema_result.ok() && table_schema_result.status().IsNotExist()) {
+		// A missing read branch must not hide an existing physical table from DDL.
+		// The scan binder still resolves and validates that branch on every read.
+		table_schema_result = paimon_catalog.LoadTableSchema(paimon::Identifier(schema.name, table_name));
+	}
 	if (!table_schema_result.ok()) {
 		if (table_schema_result.status().IsNotExist()) {
 			return nullptr;

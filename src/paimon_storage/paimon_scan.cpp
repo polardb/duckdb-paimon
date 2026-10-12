@@ -39,6 +39,7 @@
 #include "paimon_functions.hpp"
 #include "paimon_type_utils.hpp"
 #include "paimon_snapshot_resolver.hpp"
+#include "paimon_read_target.hpp"
 
 #include "paimon/api.h"
 #include "paimon/catalog/identifier.h"
@@ -53,6 +54,7 @@ namespace duckdb {
 // Execution states share only this immutable description, never a consumed reader.
 struct PaimonBoundRead {
 	string table_data_path;
+	string branch;
 	string table_schema_json;
 	map<string, string> options;
 	std::optional<int64_t> snapshot_id;
@@ -97,6 +99,10 @@ public:
 	}
 	const map<string, string> &ReadOptions() const {
 		return bound_read ? bound_read->options : paimon_options;
+	}
+	const string &ReadBranch() const {
+		D_ASSERT(bound_read);
+		return bound_read->branch;
 	}
 };
 
@@ -669,15 +675,19 @@ CreatePaimonPlan(const string &path, const string &schema, const map<string, str
 
 // Keep native selectors in the schema JSON intact, but override their dispatch
 // with an explicit full-snapshot mode in every subsequent scan/read context.
-static map<string, string> ResolvePaimonOptions(const paimon::DataSchema &schema,
-                                                const map<string, string> &overrides) {
+static map<string, string> ResolvePaimonOptions(const paimon::DataSchema &schema, const map<string, string> &overrides,
+                                                const string &branch) {
 	auto options = schema.Options();
 	for (const auto &entry : overrides) {
 		options[entry.first] = entry.second;
 	}
-	auto branch = options.find("branch");
-	if ((branch != options.end() && branch->second != "main") || options.count("scan.fallback-branch")) {
-		throw BinderException("Paimon snapshot binding supports only the default branch without a fallback branch");
+	options["branch"] = branch;
+	auto fallback = options.find("scan.fallback-branch");
+	if (fallback != options.end()) {
+		if (!PaimonReadTarget::IsBlank(fallback->second)) {
+			throw BinderException("Paimon snapshot binding does not support a non-empty scan.fallback-branch");
+		}
+		fallback->second.clear();
 	}
 	if (options.count("scan.tag-name")) {
 		throw BinderException("Paimon snapshot binding does not support scan.tag-name");
@@ -739,13 +749,6 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	auto path = PaimonTablePath::Parse(input.inputs);
 	bind_data->path = path;
 	paimon::Identifier table_identifier(path.dbname, path.tablename);
-	auto branch = table_identifier.GetBranchName();
-	if (!branch.ok()) {
-		throw BinderException(branch.status().ToString());
-	}
-	if (branch.value() && *branch.value() != paimon::Identifier::kDefaultMainBranch) {
-		throw BinderException("Paimon snapshot binding supports only the default branch without a fallback branch");
-	}
 
 	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
 	auto expected_splits = scan_options.find("debug_expected_splits");
@@ -758,20 +761,18 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	}
 	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
 	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, path.warehouse, scan_options);
-	auto table_path_result = paimon_catalog->GetTableLocation(table_identifier);
+	auto target_result = PaimonReadTarget::Load(*paimon_catalog, table_identifier, bind_data->paimon_options);
+	if (!target_result.ok()) {
+		throw IOException(target_result.status().ToString());
+	}
+	auto target = std::move(target_result).value();
+	auto table_path_result = paimon_catalog->GetTableLocation(target.schema_identifier);
 	if (!table_path_result.ok()) {
 		throw IOException(table_path_result.status().ToString());
 	}
 	bind_data->table_data_path = std::move(table_path_result).value();
 
-	auto table_schema_result = paimon_catalog->LoadTableSchema(table_identifier);
-	if (!table_schema_result.ok()) {
-		throw IOException(table_schema_result.status().ToString());
-	}
-	auto table_schema = std::move(table_schema_result).value();
-	if (!table_schema) {
-		throw IOException("Paimon table schema is empty");
-	}
+	auto table_schema = target.schema;
 
 	auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(table_schema);
 	if (!data_schema) {
@@ -790,9 +791,10 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	if (data_schema) {
 		auto read = std::make_shared<PaimonBoundRead>();
 		read->table_data_path = bind_data->table_data_path;
+		read->branch = target.branch;
 		read->table_schema_json = bind_data->table_schema_json;
 		read->read_schema_id = data_schema->Id();
-		read->options = ResolvePaimonOptions(*data_schema, bind_data->paimon_options);
+		read->options = ResolvePaimonOptions(*data_schema, bind_data->paimon_options, read->branch);
 		const auto requested_id = read->options.find("scan.snapshot-id");
 		const auto millis = read->options.find("scan.timestamp-millis");
 		const auto time_string = read->options.find("scan.timestamp");
@@ -823,8 +825,8 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 			}
 			read->deferred_error = scanner.status();
 		}
-		auto snapshots =
-		    PaimonSnapshotResolver::ListWithRetry([&]() { return paimon_catalog->ListSnapshots(table_identifier); });
+		auto snapshots = PaimonSnapshotResolver::ListWithRetry(
+		    [&]() { return paimon_catalog->ListSnapshots(target.base_identifier, read->branch); });
 		if (!snapshots.ok()) {
 			throw IOException(snapshots.status().ToString());
 		}
@@ -834,14 +836,14 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 			throw BinderException(selected.status().ToString());
 		}
 		read->snapshot_id = selected.value();
-		auto checked_schema = paimon_catalog->LoadTableSchema(table_identifier);
-		auto checked_path = paimon_catalog->GetTableLocation(table_identifier);
-		if (!checked_schema.ok() || !checked_schema.value() || !checked_path.ok()) {
+		auto checked_target = PaimonReadTarget::Load(*paimon_catalog, table_identifier, bind_data->paimon_options);
+		auto checked_path = paimon_catalog->GetTableLocation(target.schema_identifier);
+		if (!checked_target.ok() || !checked_path.ok()) {
 			throw BinderException("Paimon table changed or became unavailable during binding; retry the query");
 		}
-		auto checked_json = checked_schema.value()->GetJsonSchema();
-		if (!checked_json.ok() || checked_json.value() != read->table_schema_json ||
-		    checked_path.value() != read->table_data_path) {
+		auto checked_json = checked_target.value().schema->GetJsonSchema();
+		if (checked_target.value().branch != read->branch || !checked_json.ok() ||
+		    checked_json.value() != read->table_schema_json || checked_path.value() != read->table_data_path) {
 			throw BinderException("Paimon table schema or location changed during binding; retry the query");
 		}
 		if (read->snapshot_id) {
@@ -990,7 +992,8 @@ private:
 		}
 
 		paimon::ReadContextBuilder read_context_builder(global_state.path);
-		auto read_context_result = read_context_builder.SetOptions(bind_data.ReadOptions())
+		auto read_context_result = read_context_builder.WithBranch(bind_data.ReadBranch())
+		                               .SetOptions(bind_data.ReadOptions())
 		                               .SetTableSchema(bind_data.ReadSchema())
 		                               .SetReadFieldNames(read_field_names)
 		                               .SetPredicate(global_state.paimon_predicates)
@@ -1079,8 +1082,10 @@ static vector<PartitionStatistics> PaimonGetPartitionStats(ClientContext &, GetP
 	}
 
 	paimon::ReadContextBuilder read_context_builder(bind.ReadPath());
-	auto read_context_result =
-	    read_context_builder.SetOptions(bind.ReadOptions()).SetTableSchema(bind.ReadSchema()).Finish();
+	auto read_context_result = read_context_builder.WithBranch(bind.ReadBranch())
+	                               .SetOptions(bind.ReadOptions())
+	                               .SetTableSchema(bind.ReadSchema())
+	                               .Finish();
 	if (!read_context_result.ok()) {
 		return result;
 	}

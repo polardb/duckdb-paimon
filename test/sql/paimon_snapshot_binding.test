@@ -188,26 +188,119 @@ physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
 statement ok
 CREATE TABLE bound_pm.__test_binding.other_branch (id INTEGER) WITH ("branch"='audit');
 
+# The native filesystem catalog currently ignores branch schema identifiers.
+# Missing branches must still fail in the branch-aware scanner.
 statement error
 SELECT * FROM paimon_scan('./data/__test_binding.db/other_branch');
 ----
-supports only the default branch
+not found latest schema
 
-# Branch suffixes must not be silently resolved against main, even if absent.
+statement error
+SELECT * FROM bound_pm.__test_binding.other_branch;
+----
+not found latest schema
+
+# Missing branches must fail instead of silently reading main's four rows.
 statement error
 SELECT * FROM paimon_scan('./data', '__test_binding', 't$branch_audit');
 ----
-supports only the default branch
+not found latest schema
 
 statement error
 SELECT * FROM paimon_scan('./data/__test_binding.db/t$branch_audit');
 ----
-supports only the default branch
+not found latest schema
 
 statement error
 SELECT * FROM bound_pm.__test_binding."t$branch_audit";
 ----
-supports only the default branch
+not found latest schema
+
+# Explicit main is supported through every SQL entrypoint.
+query II
+SELECT * FROM paimon_scan('./data/__test_binding.db/t$branch_main') ORDER BY id;
+----
+1	10
+2	20
+3	30
+4	40
+
+query I
+SELECT count(*) FROM paimon_scan('./data', '__test_binding', 't$branch_main');
+----
+4
+
+query II
+SELECT * FROM bound_pm.__test_binding."t$branch_main" AT (VERSION => 1) ORDER BY id;
+----
+1	10
+2	20
+
+# A suffix wins even when the schema option selects a nonexistent branch.
+query I
+SELECT count(*) FROM bound_pm.__test_binding."other_branch$branch_main";
+----
+0
+
+query I
+SELECT count(*) FROM paimon_scan('./data/__test_binding.db/other_branch$branch_main');
+----
+0
+
+# Blank branch/fallback options preserve the default main read.
+statement ok
+CREATE TABLE bound_pm.__test_binding.empty_branch (id INTEGER) WITH ('branch'='');
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.blank_branch (id INTEGER) WITH ('branch'='   ');
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.empty_fallback (id INTEGER) WITH ('scan.fallback-branch'='');
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.blank_fallback (id INTEGER) WITH ('scan.fallback-branch'='   ');
+
+foreach option_table empty_branch blank_branch empty_fallback blank_fallback
+
+statement ok
+INSERT INTO bound_pm.__test_binding.${option_table} VALUES (7),(8);
+
+query I
+SELECT * FROM paimon_scan('./data/__test_binding.db/${option_table}') ORDER BY id;
+----
+7
+8
+
+query I
+SELECT count(*) FROM paimon_scan('./data', '__test_binding', '${option_table}');
+----
+2
+
+query I
+SELECT * FROM bound_pm.__test_binding.${option_table} ORDER BY id;
+----
+7
+8
+
+endloop
+
+statement ok
+CREATE TABLE bound_pm.__test_binding.fallback (id INTEGER) WITH ('scan.fallback-branch'='main');
+
+statement error
+SELECT * FROM paimon_scan('./data/__test_binding.db/fallback');
+----
+does not support a non-empty scan.fallback-branch
+
+statement error
+SELECT * FROM paimon_scan('./data', '__test_binding', 'fallback');
+----
+does not support a non-empty scan.fallback-branch
+
+statement error
+SELECT count(*) FROM bound_pm.__test_binding.fallback;
+----
+does not support a non-empty scan.fallback-branch
 
 # Reject non-data schemas explicitly; paimon_snapshots has its own function.
 statement error
