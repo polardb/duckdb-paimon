@@ -43,15 +43,11 @@ struct PaimonReadTarget {
 		                                                      : base.GetTableName() + "$branch_" + branch);
 	}
 
-	static paimon::Result<std::string> ResolveBranch(const paimon::Identifier &identifier,
-	                                                 const std::map<std::string, std::string> &schema_options,
-	                                                 const std::map<std::string, std::string> &overrides) {
-		auto explicit_branch = identifier.GetBranchName();
-		if (!explicit_branch.ok()) {
-			return explicit_branch.status();
-		}
-		if (explicit_branch.value()) {
-			return NormalizeBranch(*explicit_branch.value());
+	static std::string ResolveBranch(const std::optional<std::string> &explicit_branch,
+	                                 const std::map<std::string, std::string> &schema_options,
+	                                 const std::map<std::string, std::string> &overrides) {
+		if (explicit_branch) {
+			return NormalizeBranch(*explicit_branch);
 		}
 		auto option = overrides.find("branch");
 		if (option != overrides.end()) {
@@ -88,13 +84,10 @@ struct PaimonReadTarget {
 			return paimon::Status::Invalid("Paimon table schema is empty");
 		}
 		auto data_schema = std::dynamic_pointer_cast<paimon::DataSchema>(schema.value());
-		if (!explicit_branch.value() && data_schema) {
-			auto selected = ResolveBranch(identifier, data_schema->Options(), overrides);
-			if (!selected.ok()) {
-				return selected.status();
-			}
-			if (selected.value() != branch) {
-				branch = std::move(selected).value();
+		if (data_schema) {
+			auto selected = ResolveBranch(explicit_branch.value(), data_schema->Options(), overrides);
+			if (selected != branch) {
+				branch = std::move(selected);
 				schema = catalog.LoadTableSchema(SchemaIdentifier(base, branch));
 				if (!schema.ok()) {
 					return schema.status();

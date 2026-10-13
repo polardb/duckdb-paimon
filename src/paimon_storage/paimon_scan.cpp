@@ -68,14 +68,11 @@ public:
 		return false;
 	}
 	void CheckReadable() const {
-		if (bound_read && bound_read->deferred_error) {
-			throw NotImplementedException(bound_read->deferred_error->ToString());
+		if (bound_read.deferred_error) {
+			throw NotImplementedException(bound_read.deferred_error->ToString());
 		}
 	}
 	PaimonTablePath path;
-	string table_data_path;
-
-	map<string, string> paimon_options;
 
 	ArrowTableSchema arrow_table;
 
@@ -87,22 +84,20 @@ public:
 	// reader-level or DuckDB-level filtering can affect the result.
 	std::optional<idx_t> debug_expected_splits;
 
-	string table_schema_json;
-	std::shared_ptr<const PaimonBoundRead> bound_read;
+	PaimonBoundRead bound_read;
 	std::vector<std::string> field_names;
 
 	const string &ReadPath() const {
-		return bound_read ? bound_read->table_data_path : table_data_path;
+		return bound_read.table_data_path;
 	}
 	const string &ReadSchema() const {
-		return bound_read ? bound_read->table_schema_json : table_schema_json;
+		return bound_read.table_schema_json;
 	}
 	const map<string, string> &ReadOptions() const {
-		return bound_read ? bound_read->options : paimon_options;
+		return bound_read.options;
 	}
 	const string &ReadBranch() const {
-		D_ASSERT(bound_read);
-		return bound_read->branch;
+		return bound_read.branch;
 	}
 };
 
@@ -759,9 +754,9 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		}
 		bind_data->debug_expected_splits = NumericCast<idx_t>(expected_value);
 	}
-	bind_data->paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
+	auto paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
 	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, path.warehouse, scan_options);
-	auto target_result = PaimonReadTarget::Load(*paimon_catalog, table_identifier, bind_data->paimon_options);
+	auto target_result = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
 	if (!target_result.ok()) {
 		throw IOException(target_result.status().ToString());
 	}
@@ -770,7 +765,8 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	if (!table_path_result.ok()) {
 		throw IOException(table_path_result.status().ToString());
 	}
-	bind_data->table_data_path = std::move(table_path_result).value();
+	auto &read = bind_data->bound_read;
+	read.table_data_path = std::move(table_path_result).value();
 
 	auto table_schema = target.schema;
 
@@ -785,74 +781,68 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	if (!json_schema_result.ok()) {
 		throw IOException(json_schema_result.status().ToString());
 	}
-	bind_data->table_schema_json = std::move(json_schema_result).value();
+	read.table_schema_json = std::move(json_schema_result).value();
 	bind_data->field_names = table_schema->FieldNames();
 
-	if (data_schema) {
-		auto read = std::make_shared<PaimonBoundRead>();
-		read->table_data_path = bind_data->table_data_path;
-		read->branch = target.branch;
-		read->table_schema_json = bind_data->table_schema_json;
-		read->read_schema_id = data_schema->Id();
-		read->options = ResolvePaimonOptions(*data_schema, bind_data->paimon_options, read->branch);
-		const auto requested_id = read->options.find("scan.snapshot-id");
-		const auto millis = read->options.find("scan.timestamp-millis");
-		const auto time_string = read->options.find("scan.timestamp");
-		std::optional<int64_t> requested_snapshot;
-		std::optional<int64_t> timestamp;
-		if (requested_id != read->options.end()) {
-			auto parsed = PaimonSnapshotResolver::ParseInteger(requested_id->second, "scan.snapshot-id");
-			if (!parsed.ok()) {
-				throw BinderException(parsed.status().ToString());
-			}
-			requested_snapshot = parsed.value();
+	read.branch = target.branch;
+	read.read_schema_id = data_schema->Id();
+	read.options = ResolvePaimonOptions(*data_schema, paimon_options, read.branch);
+	const auto requested_id = read.options.find("scan.snapshot-id");
+	const auto millis = read.options.find("scan.timestamp-millis");
+	const auto time_string = read.options.find("scan.timestamp");
+	std::optional<int64_t> requested_snapshot;
+	std::optional<int64_t> timestamp;
+	if (requested_id != read.options.end()) {
+		auto parsed = PaimonSnapshotResolver::ParseInteger(requested_id->second, "scan.snapshot-id");
+		if (!parsed.ok()) {
+			throw BinderException(parsed.status().ToString());
 		}
-		if (millis != read->options.end() || (time_string != read->options.end() && !time_string->second.empty())) {
-			auto parsed = millis != read->options.end()
-			                  ? PaimonSnapshotResolver::ParseInteger(millis->second, "scan.timestamp-millis")
-			                  : PaimonSnapshotResolver::ParseTimestamp(time_string->second);
-			if (!parsed.ok()) {
-				throw BinderException(parsed.status().ToString());
-			}
-			timestamp = parsed.value();
+		requested_snapshot = parsed.value();
+	}
+	if (millis != read.options.end() || (time_string != read.options.end() && !time_string->second.empty())) {
+		auto parsed = millis != read.options.end()
+		                  ? PaimonSnapshotResolver::ParseInteger(millis->second, "scan.timestamp-millis")
+		                  : PaimonSnapshotResolver::ParseTimestamp(time_string->second);
+		if (!parsed.ok()) {
+			throw BinderException(parsed.status().ToString());
 		}
-		// Validate native options/read capability without opening manifests or
-		// planning splits. Unsupported empty readers must not become empty success.
-		auto scanner = CreatePaimonScanner(read->table_data_path, read->table_schema_json, read->options);
-		if (!scanner.ok()) {
-			if (!scanner.status().IsNotImplemented() || requested_snapshot || timestamp) {
-				throw IOException(scanner.status().ToString());
-			}
-			read->deferred_error = scanner.status();
+		timestamp = parsed.value();
+	}
+	// Validate native options/read capability without opening manifests or
+	// planning splits. Unsupported empty readers must not become empty success.
+	auto scanner = CreatePaimonScanner(read.table_data_path, read.table_schema_json, read.options);
+	if (!scanner.ok()) {
+		if (!scanner.status().IsNotImplemented() || requested_snapshot || timestamp) {
+			throw IOException(scanner.status().ToString());
 		}
-		auto snapshots = PaimonSnapshotResolver::ListWithRetry(
-		    [&]() { return paimon_catalog->ListSnapshots(target.base_identifier, read->branch); });
-		if (!snapshots.ok()) {
-			throw IOException(snapshots.status().ToString());
-		}
-		auto selected =
-		    PaimonSnapshotResolver::Resolve(snapshots.value(), requested_snapshot, timestamp, read->read_schema_id);
-		if (!selected.ok()) {
-			throw BinderException(selected.status().ToString());
-		}
-		read->snapshot_id = selected.value();
-		auto checked_target = PaimonReadTarget::Load(*paimon_catalog, table_identifier, bind_data->paimon_options);
-		auto checked_path = paimon_catalog->GetTableLocation(target.schema_identifier);
-		if (!checked_target.ok() || !checked_path.ok()) {
-			throw BinderException("Paimon table changed or became unavailable during binding; retry the query");
-		}
-		auto checked_json = checked_target.value().schema->GetJsonSchema();
-		if (checked_target.value().branch != read->branch || !checked_json.ok() ||
-		    checked_json.value() != read->table_schema_json || checked_path.value() != read->table_data_path) {
-			throw BinderException("Paimon table schema or location changed during binding; retry the query");
-		}
-		if (read->snapshot_id) {
-			read->options["scan.mode"] = "from-snapshot-full";
-			read->options["scan.snapshot-id"] = std::to_string(*read->snapshot_id);
-			read->options.erase("scan.timestamp-millis");
-			read->options.erase("scan.timestamp");
-		}
-		bind_data->bound_read = std::move(read);
+		read.deferred_error = scanner.status();
+	}
+	auto snapshots = PaimonSnapshotResolver::ListWithRetry(
+	    [&]() { return paimon_catalog->ListSnapshots(target.base_identifier, read.branch); });
+	if (!snapshots.ok()) {
+		throw IOException(snapshots.status().ToString());
+	}
+	auto selected =
+	    PaimonSnapshotResolver::Resolve(snapshots.value(), requested_snapshot, timestamp, read.read_schema_id);
+	if (!selected.ok()) {
+		throw BinderException(selected.status().ToString());
+	}
+	read.snapshot_id = selected.value();
+	auto checked_target = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
+	auto checked_path = paimon_catalog->GetTableLocation(target.schema_identifier);
+	if (!checked_target.ok() || !checked_path.ok()) {
+		throw BinderException("Paimon table changed or became unavailable during binding; retry the query");
+	}
+	auto checked_json = checked_target.value().schema->GetJsonSchema();
+	if (checked_target.value().branch != read.branch || !checked_json.ok() ||
+	    checked_json.value() != read.table_schema_json || checked_path.value() != read.table_data_path) {
+		throw BinderException("Paimon table schema or location changed during binding; retry the query");
+	}
+	if (read.snapshot_id) {
+		read.options["scan.mode"] = "from-snapshot-full";
+		read.options["scan.snapshot-id"] = std::to_string(*read.snapshot_id);
+		read.options.erase("scan.timestamp-millis");
+		read.options.erase("scan.timestamp");
 	}
 
 	auto arrow_schema_result = table_schema->GetArrowSchema();
@@ -894,7 +884,7 @@ struct PaimonScanGlobalState : public GlobalTableFunctionState {
 
 static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const PaimonScanBindData &bind) {
 	bind.CheckReadable();
-	if (bind.bound_read && !bind.bound_read->snapshot_id) {
+	if (!bind.bound_read.snapshot_id) {
 		return {};
 	}
 	auto plan =
@@ -902,7 +892,7 @@ static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const 
 	if (!plan.ok()) {
 		throw IOException(plan.status().ToString());
 	}
-	if (bind.bound_read && plan.value()->SnapshotId() != bind.bound_read->snapshot_id) {
+	if (plan.value()->SnapshotId() != bind.bound_read.snapshot_id) {
 		throw IOException("Paimon scan no longer resolves to its bound snapshot");
 	}
 
@@ -1073,7 +1063,7 @@ static vector<PartitionStatistics> PaimonGetPartitionStats(ClientContext &, GetP
 	// Planning validates the retained identity: failures must not be swallowed
 	// as optional statistics failures (or cause a later scan of another version).
 	auto splits = CreatePaimonScanSplits(bind);
-	if (bind.bound_read && !bind.bound_read->snapshot_id) {
+	if (!bind.bound_read.snapshot_id) {
 		PartitionStatistics stats;
 		stats.count = 0;
 		stats.count_type = CountType::COUNT_EXACT;
@@ -1174,13 +1164,11 @@ static InsertionOrderPreservingMap<string> PaimonScanToString(TableFunctionToStr
 	InsertionOrderPreservingMap<string> result;
 	if (input.bind_data) {
 		auto &bind = input.bind_data->Cast<PaimonScanBindData>();
-		if (bind.bound_read) {
-			auto &read = *bind.bound_read;
-			result["Bound Snapshot"] = read.deferred_error
-			                               ? "unreadable"
-			                               : (read.snapshot_id ? std::to_string(*read.snapshot_id) : "empty-at-bind");
-			result["Read Schema"] = std::to_string(read.read_schema_id);
-		}
+		auto &read = bind.bound_read;
+		result["Bound Snapshot"] = read.deferred_error
+		                               ? "unreadable"
+		                               : (read.snapshot_id ? std::to_string(*read.snapshot_id) : "empty-at-bind");
+		result["Read Schema"] = std::to_string(read.read_schema_id);
 	}
 	return result;
 }

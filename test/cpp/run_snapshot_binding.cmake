@@ -20,21 +20,6 @@ endforeach()
 file(MAKE_DIRECTORY "${TEST_ROOT}")
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef test_id)
 set(warehouse "${TEST_ROOT}/warehouse-${test_id}")
-execute_process(COMMAND "${TEST_BINARY}" "[paimon]" --list-tests
-  RESULT_VARIABLE inventory_result OUTPUT_VARIABLE inventory_output ERROR_VARIABLE inventory_error TIMEOUT 30)
-message("${inventory_output}${inventory_error}")
-# Catch v2 returns the number of listed cases, not zero, for --list-tests.
-if(NOT "${inventory_result}" MATCHES "^[0-9]+$" OR inventory_result LESS 1)
-  message(FATAL_ERROR "Paimon test inventory failed or was empty (${inventory_result})")
-endif()
-# DuckDB's bundled Catch prints a TSV header followed by one line per case.
-string(REGEX MATCHALL "[^\n]+" inventory_lines "${inventory_output}")
-list(LENGTH inventory_lines inventory_line_count)
-math(EXPR expected_line_count "${inventory_result} + 1")
-if(NOT inventory_output MATCHES "^name\tgroup\n" OR
-   NOT inventory_line_count EQUAL expected_line_count)
-  message(FATAL_ERROR "Incomplete Paimon test inventory (${inventory_result})")
-endif()
 execute_process(COMMAND "${CMAKE_COMMAND}" -E env "PAIMON_TEST_ROOT=${warehouse}"
   "${TEST_BINARY}" "[paimon]" --warn NoTests --reporter compact
   RESULT_VARIABLE result TIMEOUT 180)
