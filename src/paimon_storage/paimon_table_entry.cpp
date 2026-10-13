@@ -32,6 +32,7 @@
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 
 #include "paimon_catalog.hpp"
+#include "paimon_functions.hpp"
 
 namespace duckdb {
 
@@ -91,6 +92,11 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 	TableFunctionBindInput bind_input(inputs, param_map, return_types, names, nullptr, nullptr, scan_function,
 	                                  empty_ref);
 	bind_data = scan_function.bind(context, bind_input, return_types, names);
+	if (!schema_signature.empty() &&
+	    schema_signature != PaimonFunctions::GetColumnSignature(PaimonFunctions::GetScanSchema(*bind_data))) {
+		throw BinderException(
+		    "Paimon catalog schema changed; detach and reattach the catalog before querying this table");
+	}
 
 	return scan_function;
 }

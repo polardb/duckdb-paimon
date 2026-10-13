@@ -204,6 +204,39 @@ endif()
 list(APPEND PAIMON_CPP_LIBS ${PAIMON_CPP_SYSTEM_LIBS})
 target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
+
+if(BUILD_UNITTESTS)
+  add_executable(unittest_paimon EXCLUDE_FROM_ALL test/cpp/main.cpp
+                 test/cpp/paimon_read_target.cpp
+                 test/cpp/paimon_snapshot_binding.cpp
+                 test/cpp/paimon_snapshot_resolver.cpp)
+  target_compile_definitions(unittest_paimon PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
+  if(PAIMON_ENABLE_REST)
+    target_sources(unittest_paimon PRIVATE test/cpp/paimon_rest_branch.cpp)
+    target_include_directories(unittest_paimon SYSTEM PRIVATE
+                               ${CMAKE_SOURCE_DIR}/third_party/httplib)
+  endif()
+  target_include_directories(unittest_paimon PRIVATE
+                             ${CMAKE_SOURCE_DIR}/third_party/catch
+                             ${CMAKE_SOURCE_DIR}/test/include)
+  target_include_directories(unittest_paimon SYSTEM PRIVATE ${PAIMON_CPP_INCLUDE})
+  target_compile_definitions(unittest_paimon PRIVATE
+    PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+    PAIMON_SCHEMA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/fixtures"
+    PAIMON_NATIVE_FIXTURE_DIR="${PAIMON_CPP_SOURCE_DIR}/test/test_data")
+  set_target_properties(unittest_paimon PROPERTIES
+                        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
+  target_link_libraries(unittest_paimon test_helpers duckdb_static ${EXTENSION_NAME})
+  link_extension_libraries(unittest_paimon "")
+  link_threads(unittest_paimon "")
+  add_custom_target(paimon_check_snapshot_binding
+    COMMAND ${CMAKE_COMMAND}
+      "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon>"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/binding-test-work"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+    DEPENDS unittest_paimon
+    USES_TERMINAL)
+endif()
 if(APPLE)
   target_link_options(${EXTENSION_NAME} PUBLIC "SHELL:-framework Security"
                       "SHELL:-framework CoreFoundation" "SHELL:-framework Network")
