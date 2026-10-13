@@ -40,6 +40,8 @@ struct PaimonTablePath {
 
 class PaimonFunctions {
 public:
+	static string GetScanSchema(const FunctionData &data);
+	static string GetColumnSignature(const string &schema_json);
 	static void RegisterTableFunction(ExtensionLoader &loader, CreateTableFunctionInfo info);
 	static CreateTableFunctionInfo GetPaimonScanFunction();
 	static CreateTableFunctionInfo GetPaimonSnapshotsFunction();

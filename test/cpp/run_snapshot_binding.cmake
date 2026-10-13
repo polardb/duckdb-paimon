@@ -1,0 +1,29 @@
+# Copyright (c) 2026, Alibaba Group Holding Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+foreach(required TEST_BINARY TEST_ROOT)
+  if(NOT DEFINED ${required})
+    message(FATAL_ERROR "Missing ${required}")
+  endif()
+endforeach()
+file(MAKE_DIRECTORY "${TEST_ROOT}")
+string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef test_id)
+set(warehouse "${TEST_ROOT}/warehouse-${test_id}")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env "PAIMON_TEST_ROOT=${warehouse}"
+  "${TEST_BINARY}" "[paimon]" --warn NoTests --reporter compact
+  RESULT_VARIABLE result TIMEOUT 180)
+if(NOT "${result}" STREQUAL "0")
+  message(FATAL_ERROR "Snapshot binding test failed (${result}); inputs preserved at ${warehouse}")
+endif()
+file(REMOVE_RECURSE "${warehouse}")

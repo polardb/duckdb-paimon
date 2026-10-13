@@ -38,26 +38,27 @@ SELECT part, idx, payload FROM paimon_scan('./data/scalar_index.db/t1', debug_ex
 2	82	miss_b_82
 2	90	miss_b_90
 
-# scalar index scan: equality hit
+# Global index pruning is disabled until native planning accepts the bound schema.
+# Equality/range/missing-point results must remain correct with all three splits.
 query II
-SELECT idx, part FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=1) WHERE idx = 40;
+SELECT idx, part FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=3) WHERE idx = 40;
 ----
 40	0
 
 # scalar index scan: range hit
 query I
-SELECT idx FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=1) WHERE idx BETWEEN 39 AND 41 ORDER BY idx;
+SELECT idx FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=3) WHERE idx BETWEEN 39 AND 41 ORDER BY idx;
 ----
 40
 
 # scalar index scan: filter on index column with non-index projection
 query T
-SELECT payload FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=1) WHERE idx = 40;
+SELECT payload FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=3) WHERE idx = 40;
 ----
 hit_40
 
-# scalar index scan: missing point prunes every split during planning
+# A missing point is filtered out without using the unsafe global index path.
 query I
-SELECT count(*) FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=0) WHERE idx = 44;
+SELECT count(*) FROM paimon_scan('./data/scalar_index.db/t1', debug_expected_splits=3) WHERE idx = 44;
 ----
 0
