@@ -36,6 +36,10 @@
 
 #include "catch.hpp"
 #include "yyjson.hpp"
+#include "paimon/catalog/catalog.h"
+#include "paimon/schema/schema.h"
+#include "arrow/c/bridge.h"
+#include "arrow/type.h"
 
 #include <algorithm>
 #include <atomic>
@@ -224,6 +228,36 @@ struct BindingFixture {
 		SQL(writer, "CREATE SCHEMA pm.race");
 		SQL(writer, "CREATE TABLE pm.race.t (id INTEGER, value INTEGER)");
 	}
+
+	// DuckDB 1.4 does not retain CREATE TABLE options or parse PARTITIONED BY.
+	// Use the native catalog for fixture metadata; commits and reads still use SQL.
+	void CreateTable(const string &name, const std::vector<std::string> &columns,
+	                 const std::map<std::string, std::string> &options = {},
+	                 const std::vector<std::string> &primary_keys = {},
+	                 const std::vector<std::string> &partition_keys = {}) {
+		auto catalog = paimon::Catalog::Create(warehouse, {});
+		REQUIRE(catalog.ok());
+		::arrow::FieldVector fields;
+		for (const auto &column : columns) {
+			const bool nullable = std::find(primary_keys.begin(), primary_keys.end(), column) == primary_keys.end();
+			fields.push_back(::arrow::field(column, ::arrow::int32(), nullable));
+		}
+		::ArrowSchema schema;
+		REQUIRE(::arrow::ExportSchema(*::arrow::schema(fields), &schema).ok());
+		paimon::Identifier identifier("race", name);
+		auto status = catalog.value()->CreateTable(identifier, &schema, partition_keys, primary_keys, options, false);
+		INFO(status.ToString());
+		REQUIRE(status.ok());
+		auto loaded = catalog.value()->LoadTableSchema(identifier);
+		REQUIRE(loaded.ok());
+		auto data = std::dynamic_pointer_cast<paimon::DataSchema>(loaded.value());
+		REQUIRE(data);
+		REQUIRE(data->PrimaryKeys() == primary_keys);
+		REQUIRE(data->PartitionKeys() == partition_keys);
+		for (const auto &option : options) {
+			REQUIRE(data->Options().at(option.first) == option.second);
+		}
+	}
 };
 
 // Branches share data and manifests at the table root; only metadata is copied.
@@ -263,11 +297,15 @@ static void SetSchemaOption(const string &path, const string &key, const string 
 
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: main branch options", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
-	const auto options = GENERATE("", "'branch'='main'", "'branch'=''", "'branch'=' \t\r\n '",
-	                              "'scan.fallback-branch'=''", "'scan.fallback-branch'=' \t\r\n '");
-	CAPTURE(static_cast<int>(entry), options, warehouse);
-	SQL(writer, "CREATE TABLE pm.race.main_options (id INTEGER, value INTEGER)" +
-	                (string(options).empty() ? "" : " WITH (" + string(options) + ")"));
+	const auto option = GENERATE(std::make_pair("", ""), std::make_pair("branch", "main"), std::make_pair("branch", ""),
+	                             std::make_pair("branch", " \t\r\n "), std::make_pair("scan.fallback-branch", ""),
+	                             std::make_pair("scan.fallback-branch", " \t\r\n "));
+	CAPTURE(static_cast<int>(entry), option.first, option.second, warehouse);
+	std::map<std::string, std::string> options;
+	if (*option.first) {
+		options.emplace(option.first, option.second);
+	}
+	CreateTable("main_options", {"id", "value"}, options);
 	SQL(writer, "INSERT INTO pm.race.main_options VALUES (1,10),(2,20)");
 	for (const auto &table : {"main_options", "main_options$branch_main"}) {
 		auto bound = Bind(reader, warehouse, entry, table);
@@ -352,9 +390,10 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: empty branch", "[paimon][snaps
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch selectors", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	const auto selector =
-	    GENERATE("'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'", "'scan.timestamp'='2099-01-01'");
-	CAPTURE(static_cast<int>(entry), selector, warehouse);
-	SQL(writer, "CREATE TABLE pm.race.selected_branch (id INTEGER, value INTEGER) WITH (" + string(selector) + ")");
+	    GENERATE(std::make_pair("scan.snapshot-id", "1"), std::make_pair("scan.timestamp-millis", "4102444800000"),
+	             std::make_pair("scan.timestamp", "2099-01-01"));
+	CAPTURE(static_cast<int>(entry), selector.first, selector.second, warehouse);
+	CreateTable("selected_branch", {"id", "value"}, {{selector.first, selector.second}});
 	SQL(writer, "INSERT INTO pm.race.selected_branch VALUES (1,10)");
 	CopyBranch(warehouse + "/race.db/selected_branch");
 	SQL(writer, "INSERT INTO pm.race.selected_branch VALUES (2,20)");
@@ -403,9 +442,9 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: missing branch and fallback", 
 	auto main = Bind(reader, warehouse, entry, "t$branch_main");
 	REQUIRE(Count(reader, main) == 1);
 	ExpectRows(Read(reader, main), {{Value(1), Value(10)}});
-	SQL(writer, "CREATE TABLE pm.race.missing_option (id INTEGER) WITH ('branch'='missing')");
+	CreateTable("missing_option", {"id"}, {{"branch", "missing"}});
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_option"), missing);
-	SQL(writer, "CREATE TABLE pm.race.fallback (id INTEGER) WITH ('scan.fallback-branch'='main')");
+	CreateTable("fallback", {"id"}, {{"scan.fallback-branch", "main"}});
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "fallback"),
 	                    Catch::Contains("does not support a non-empty scan.fallback-branch"));
 	SQL(reader, "SELECT 42");
@@ -413,11 +452,15 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: missing branch and fallback", 
 
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: hidden manifests", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
-	const auto selector = GENERATE("", "'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'",
-	                               "'scan.timestamp'='2099-01-01'");
-	CAPTURE(static_cast<int>(entry), selector, warehouse);
-	auto options = string(selector).empty() ? "" : " WITH (" + string(selector) + ")";
-	SQL(writer, "CREATE TABLE pm.race.hidden (id INTEGER, value INTEGER)" + options);
+	const auto selector = GENERATE(std::make_pair("", ""), std::make_pair("scan.snapshot-id", "1"),
+	                               std::make_pair("scan.timestamp-millis", "4102444800000"),
+	                               std::make_pair("scan.timestamp", "2099-01-01"));
+	CAPTURE(static_cast<int>(entry), selector.first, selector.second, warehouse);
+	std::map<std::string, std::string> options;
+	if (*selector.first) {
+		options.emplace(selector.first, selector.second);
+	}
+	CreateTable("hidden", {"id", "value"}, options);
 	SQL(writer, "INSERT INTO pm.race.hidden VALUES (1,10)");
 	std::filesystem::rename(warehouse + "/race.db/hidden/manifest", warehouse + "/hidden-manifest");
 	auto bound = Bind(reader, warehouse, entry, "hidden");
@@ -447,13 +490,13 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: corrupt snapshot metadata", "[
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: mode", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	CAPTURE(static_cast<int>(entry), warehouse);
-	SQL(writer, "CREATE TABLE pm.race.mode (id INTEGER) WITH ('scan.mode'='latest','scan.snapshot-id'='1')");
+	CreateTable("mode", {"id"}, {{"scan.mode", "latest"}, {"scan.snapshot-id", "1"}});
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "mode"), Catch::Contains("scan.mode conflicts"));
 	const auto missing = GENERATE("from-snapshot", "from-snapshot-full", "from-timestamp");
-	SQL(writer, "CREATE TABLE pm.race.missing_selector (id INTEGER) WITH ('scan.mode'='" + string(missing) + "')");
+	CreateTable("missing_selector", {"id"}, {{"scan.mode", missing}});
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_selector"), Catch::Contains("requires a matching"));
 	if (entry != Entry::CATALOG) {
-		SQL(writer, "CREATE TABLE pm.race.conflicting_time (id INTEGER) WITH ('scan.timestamp'='2099-01-01')");
+		CreateTable("conflicting_time", {"id"}, {{"scan.timestamp", "2099-01-01"}});
 		named_parameter_map_t parameters;
 		parameters["snapshot_from_timestamp"] = Value("2099-01-01").DefaultCastAs(LogicalType::TIMESTAMP);
 		REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "conflicting_time", parameters),
@@ -474,10 +517,10 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: unsupported", "[paimon][snapsh
 	REQUIRE_THROWS_WITH(Read(reader, bound), Catch::Contains("do not support pk table bucket=-1"));
 	// Persistent selectors also exercise the attached path. Failure must
 	// occur in Bind, not merely when a later reader sees the saved error.
-	SQL(writer, "CREATE TABLE pm.race.unsupported_id (id INTEGER PRIMARY KEY) WITH ('scan.snapshot-id'='1')");
+	CreateTable("unsupported_id", {"id"}, {{"scan.snapshot-id", "1"}}, {"id"});
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "unsupported_id"),
 	                    Catch::Contains("do not support pk table bucket=-1"));
-	SQL(writer, "CREATE TABLE pm.race.unsupported_time (id INTEGER PRIMARY KEY) WITH ('scan.timestamp-millis'='1')");
+	CreateTable("unsupported_time", {"id"}, {{"scan.timestamp-millis", "1"}}, {"id"});
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "unsupported_time"),
 	                    Catch::Contains("do not support pk table bucket=-1"));
 	SQL(reader, "SELECT 42");
@@ -486,7 +529,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: unsupported", "[paimon][snapsh
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: pk", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	CAPTURE(static_cast<int>(entry), warehouse);
-	SQL(writer, "CREATE TABLE pm.race.pk (id INTEGER PRIMARY KEY, value INTEGER) WITH ('bucket'='1')");
+	CreateTable("pk", {"id", "value"}, {{"bucket", "1"}}, {"id"});
 	SQL(writer, "INSERT INTO pm.race.pk VALUES (1,10),(2,20)");
 	auto bound = Bind(reader, warehouse, entry, "pk");
 	SQL(writer, "INSERT INTO pm.race.pk VALUES (1,99),(3,30)");
@@ -501,7 +544,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: pk", "[paimon][snapshot_bindin
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: partition", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	CAPTURE(static_cast<int>(entry), warehouse);
-	SQL(writer, "CREATE TABLE pm.race.partitioned (id INTEGER, part INTEGER) PARTITIONED BY (part)");
+	CreateTable("partitioned", {"id", "part"}, {}, {}, {"part"});
 	SQL(writer, "INSERT INTO pm.race.partitioned VALUES (1,10),(2,20)");
 	auto bound = Bind(reader, warehouse, entry, "partitioned");
 	PushEqual(reader, bound, 1, 10);
@@ -736,16 +779,17 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: timestamp", "[paimon][snapshot
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: retained table selectors", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	const auto selector =
-	    GENERATE("'scan.snapshot-id'='1'", "'scan.timestamp-millis'='4102444800000'", "'scan.timestamp'='2099-01-01'");
-	CAPTURE(static_cast<int>(entry), selector, warehouse);
-	SQL(writer, "CREATE TABLE pm.race.selected (id INTEGER, value INTEGER) WITH (" + string(selector) + ")");
+	    GENERATE(std::make_pair("scan.snapshot-id", "1"), std::make_pair("scan.timestamp-millis", "4102444800000"),
+	             std::make_pair("scan.timestamp", "2099-01-01"));
+	CAPTURE(static_cast<int>(entry), selector.first, selector.second, warehouse);
+	CreateTable("selected", {"id", "value"}, {{selector.first, selector.second}});
 	SQL(writer, "INSERT INTO pm.race.selected VALUES (1,10)");
 	auto bound = Bind(reader, warehouse, entry, "selected");
 	SQL(writer, "INSERT INTO pm.race.selected VALUES (2,20)");
 	REQUIRE(Count(reader, bound) == 1);
 	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
 	auto fresh = Bind(reader, warehouse, entry, "selected");
-	if (string(selector).find("scan.snapshot-id") != string::npos) {
+	if (string(selector.first) == "scan.snapshot-id") {
 		ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}});
 	} else {
 		ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}});

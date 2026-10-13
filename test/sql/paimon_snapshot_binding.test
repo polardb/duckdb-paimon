@@ -165,9 +165,58 @@ EXECUTE latest_catalog;
 3	30
 4	40
 
-# Uppercase modes and numeric table options retain native parsing compatibility.
+# DuckDB 1.4 discards CREATE TABLE options. Install schema fixtures while
+# detached, as in the existing v1.4 write tests, then exercise the real reader.
+foreach option_table options other_branch empty_branch blank_branch empty_fallback blank_fallback fallback mode_latest mode_time mode_id invalid_id
+
 statement ok
-CREATE TABLE bound_pm.__test_binding.options (id INTEGER) WITH ("scan.mode"='DEFAULT',"scan.snapshot-id"='01');
+CREATE TABLE bound_pm.__test_binding.${option_table} (id INTEGER);
+
+endloop
+
+statement ok
+DETACH bound_pm;
+
+statement ok
+CREATE TEMP MACRO binding_schema_fixture(options) AS '{"version":3,"id":0,"fields":[{"id":0,"name":"id","type":"INT"}],"highestFieldId":0,"partitionKeys":[],"primaryKeys":[],"options":' || options || ',"timeMillis":0}';
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.mode":"DEFAULT","scan.snapshot-id":"01"}')) TO './data/__test_binding.db/options/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"branch":"audit"}')) TO './data/__test_binding.db/other_branch/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"branch":""}')) TO './data/__test_binding.db/empty_branch/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"branch":"   "}')) TO './data/__test_binding.db/blank_branch/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.fallback-branch":""}')) TO './data/__test_binding.db/empty_fallback/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.fallback-branch":"   "}')) TO './data/__test_binding.db/blank_fallback/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.fallback-branch":"main"}')) TO './data/__test_binding.db/fallback/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.mode":"latest","scan.snapshot-id":"1"}')) TO './data/__test_binding.db/mode_latest/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.mode":"from-timestamp","scan.snapshot-id":"1"}')) TO './data/__test_binding.db/mode_time/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.mode":"from-snapshot","scan.timestamp-millis":"1"}')) TO './data/__test_binding.db/mode_id/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT binding_schema_fixture('{"scan.snapshot-id":"999999999999999999999999"}')) TO './data/__test_binding.db/invalid_id/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+ATTACH './data' AS bound_pm (TYPE paimon);
+
+# Uppercase modes and numeric table options retain native parsing compatibility.
 
 statement ok
 INSERT INTO bound_pm.__test_binding.options VALUES (1);
@@ -184,9 +233,6 @@ query II
 EXPLAIN SELECT * FROM paimon_scan('./data/__test_binding.db/options');
 ----
 physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
-
-statement ok
-CREATE TABLE bound_pm.__test_binding.other_branch (id INTEGER) WITH ("branch"='audit');
 
 # The native filesystem catalog currently ignores branch schema identifiers.
 # Missing branches must still fail in the branch-aware scanner.
@@ -248,18 +294,6 @@ SELECT count(*) FROM paimon_scan('./data/__test_binding.db/other_branch$branch_m
 0
 
 # Blank branch/fallback options preserve the default main read.
-statement ok
-CREATE TABLE bound_pm.__test_binding.empty_branch (id INTEGER) WITH ('branch'='');
-
-statement ok
-CREATE TABLE bound_pm.__test_binding.blank_branch (id INTEGER) WITH ('branch'='   ');
-
-statement ok
-CREATE TABLE bound_pm.__test_binding.empty_fallback (id INTEGER) WITH ('scan.fallback-branch'='');
-
-statement ok
-CREATE TABLE bound_pm.__test_binding.blank_fallback (id INTEGER) WITH ('scan.fallback-branch'='   ');
-
 foreach option_table empty_branch blank_branch empty_fallback blank_fallback
 
 statement ok
@@ -283,9 +317,6 @@ SELECT * FROM bound_pm.__test_binding.${option_table} ORDER BY id;
 8
 
 endloop
-
-statement ok
-CREATE TABLE bound_pm.__test_binding.fallback (id INTEGER) WITH ('scan.fallback-branch'='main');
 
 statement error
 SELECT * FROM paimon_scan('./data/__test_binding.db/fallback');
@@ -331,24 +362,15 @@ SELECT count(*) FROM bound_pm.__test_binding.unsupported_pk;
 do not support pk table bucket=-1
 
 # Explicit modes cannot silently override conflicting effective selectors.
-statement ok
-CREATE TABLE bound_pm.__test_binding.mode_latest (id INTEGER) WITH ('scan.mode'='latest','scan.snapshot-id'='1');
-
 statement error
 SELECT * FROM bound_pm.__test_binding.mode_latest;
 ----
 scan.mode conflicts
 
-statement ok
-CREATE TABLE bound_pm.__test_binding.mode_time (id INTEGER) WITH ('scan.mode'='from-timestamp','scan.snapshot-id'='1');
-
 statement error
 SELECT * FROM bound_pm.__test_binding.mode_time;
 ----
 scan.mode conflicts
-
-statement ok
-CREATE TABLE bound_pm.__test_binding.mode_id (id INTEGER) WITH ('scan.mode'='from-snapshot','scan.timestamp-millis'='1');
 
 statement error
 SELECT * FROM bound_pm.__test_binding.mode_id;
@@ -356,9 +378,23 @@ SELECT * FROM bound_pm.__test_binding.mode_id;
 scan.mode conflicts
 
 statement error
-CREATE TABLE bound_pm.__test_binding.invalid_id (id INTEGER) WITH ('scan.snapshot-id'='999999999999999999999999');
+SELECT * FROM paimon_scan('./data/__test_binding.db/invalid_id');
 ----
-Invalid Config
+Invalid Paimon scan.snapshot-id
+
+# Native DROP validates every stored schema's options, so restore the same
+# fixture schema after the negative check to keep cleanup and reruns valid.
+statement ok
+DETACH bound_pm;
+
+statement ok
+COPY (SELECT binding_schema_fixture('{}')) TO './data/__test_binding.db/invalid_id/schema/schema-0' (FORMAT CSV, HEADER false, DELIMITER '\t', QUOTE '', ESCAPE '');
+
+statement ok
+DROP MACRO binding_schema_fixture;
+
+statement ok
+ATTACH './data' AS bound_pm (TYPE paimon);
 
 # Historical data is projected using the latest schema captured at this bind.
 # These are genuine schema-evolution histories already checked into the repo.
