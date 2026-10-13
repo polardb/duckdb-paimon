@@ -585,39 +585,16 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: empty", "[paimon][snapshot_bin
 
 TEST_CASE_METHOD(BindingFixture, "Paimon binding: retained", "[paimon][snapshot_binding]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
-	CAPTURE(static_cast<int>(entry), warehouse);
-	const string scenario = "retained";
+	const auto stats_first = GENERATE(true, false);
+	CAPTURE(static_cast<int>(entry), stats_first, warehouse);
 	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10),(2,20)");
 	auto bound = Bind(reader, warehouse, entry);
-	if (scenario == "retained") {
+	if (stats_first) {
 		INFO("S1 count before commit");
 		REQUIRE(Count(reader, bound) == 2);
 	}
 	SQL(writer, "INSERT INTO pm.race.t VALUES (3,30)");
-	if (scenario == "retained_rows") {
-		ExpectRows(Read(reader, bound), {{Value(1), Value(10)}, {Value(2), Value(20)}});
-	}
-	INFO("bound statistics advanced to S2");
-	REQUIRE(Count(reader, bound) == 2);
-	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}, {Value(2), Value(20)}});
-	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}, {Value(2), Value(20)}});
-	auto fresh = Bind(reader, warehouse, entry);
-	ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}, {Value(3), Value(30)}});
-	SQL(reader, "SELECT 42");
-}
-
-TEST_CASE_METHOD(BindingFixture, "Paimon binding: retained_rows", "[paimon][snapshot_binding]") {
-	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
-	CAPTURE(static_cast<int>(entry), warehouse);
-	const string scenario = "retained_rows";
-	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10),(2,20)");
-	auto bound = Bind(reader, warehouse, entry);
-	if (scenario == "retained") {
-		INFO("S1 count before commit");
-		REQUIRE(Count(reader, bound) == 2);
-	}
-	SQL(writer, "INSERT INTO pm.race.t VALUES (3,30)");
-	if (scenario == "retained_rows") {
+	if (!stats_first) {
 		ExpectRows(Read(reader, bound), {{Value(1), Value(10)}, {Value(2), Value(20)}});
 	}
 	INFO("bound statistics advanced to S2");
