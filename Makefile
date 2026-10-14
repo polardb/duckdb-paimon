@@ -15,7 +15,7 @@ test_release_internal:
 test_debug_internal:
 	./build/debug/test/unittest --require paimon --warn NoTests "$(TESTS_BASE_DIRECTORY)*"
 test_reldebug_internal:
-	./build/relwithdebinfo/test/unittest --require paimon --warn NoTests "$(TESTS_BASE_DIRECTORY)*"
+	./build/reldebug/test/unittest --require paimon --warn NoTests "$(TESTS_BASE_DIRECTORY)*"
 
 # Exercise retained bindings alongside SQLLogicTests in local and CI entry points.
 .PHONY: test_snapshot_binding_release test_snapshot_binding_debug test_snapshot_binding_reldebug
