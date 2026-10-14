@@ -1,7 +1,7 @@
 name: Release Paimon Extension Bundle
 
 env:
-  duckdb_version: v1.5.5
+  duckdb_version: 88ecd0a49d7d3d838e002b2fbc0ce91ccf74110e
 
 on:
   push:
@@ -56,6 +56,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git -C duckdb rev-parse HEAD)" = "${duckdb_version}"
           git -C duckdb fetch --force --tags
           git -C duckdb describe --tags --long
 

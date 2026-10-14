@@ -15,6 +15,8 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "paimon_extension.hpp"
 #include "paimon_functions.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/function/partition_stats.hpp"
 #include "httplib.hpp"
 #include "yyjson.hpp"
 
@@ -57,10 +59,10 @@ std::string SchemaJson(bool dev, bool option_dev) {
 }
 
 struct RestBoundScan {
-	TableFunction function;
+	BoundTableFunction function;
 	unique_ptr<FunctionData> data;
 	vector<LogicalType> types;
-	vector<string> names;
+	vector<Identifier> names;
 };
 
 struct RestBranchFixture {
@@ -191,7 +193,7 @@ struct RestBranchFixture {
 		connection.BeginTransaction();
 		try {
 			const string table_name = "t";
-			EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, table_name);
+			EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, Identifier(table_name));
 			auto &entry = Catalog::GetEntry(*connection.context, "rest_pm", "db", lookup).Cast<TableCatalogEntry>();
 			const auto names = entry.GetColumns().GetColumnNames();
 			const auto types = entry.GetTypes();
@@ -219,16 +221,17 @@ struct RestBranchFixture {
 			auto &context = *connection.context;
 			auto info = PaimonFunctions::GetPaimonScanFunction();
 			vector<LogicalType> argument_types(3, LogicalType(LogicalTypeId::VARCHAR));
-			bound.function = info.functions.GetFunctionByArguments(context, argument_types);
+			bound.function = BoundTableFunction(info.functions.GetFunctionByArguments(context, argument_types));
 			vector<Value> args {Value("branch-test"), Value("db"), Value(table)};
 			// Attached tables supply these catalog options directly to the bind callback;
 			// paimon_scan's SQL named parameters intentionally do not expose them.
-			named_parameter_map_t parameters {{"metastore", Value("rest")},
-			                                  {"uri", Value(uri)},
-			                                  {"token_provider", Value("bear")},
-			                                  {"token", Value("test-token")}};
+			named_argument_map_t parameters;
+			parameters["metastore"] = Value("rest");
+			parameters["uri"] = Value(uri);
+			parameters["token_provider"] = Value("bear");
+			parameters["token"] = Value("test-token");
 			vector<LogicalType> input_types;
-			vector<string> input_names;
+			vector<Identifier> input_names;
 			TableFunctionRef ref;
 			TableFunctionBindInput input(args, parameters, input_types, input_names, nullptr, nullptr, bound.function,
 			                             ref);

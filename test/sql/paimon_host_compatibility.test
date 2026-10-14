@@ -1,0 +1,53 @@
+# name: test/sql/paimon_host_compatibility.test
+# group: [sql]
+
+require paimon
+
+# Identifier conversion must preserve the bytes native Paimon uses for paths and fields.
+statement ok
+ATTACH '{TEST_DIR}/host_compatibility' AS pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA pm."MiXeD";
+
+statement ok
+CREATE TABLE pm."MiXeD"."TaBlE" ("Key" INTEGER, "Payload" VARCHAR, "Part" VARCHAR)
+PARTITIONED BY ("Part") WITH (bucket = -1, file.format = parquet);
+
+statement ok
+INSERT INTO pm."MiXeD"."TaBlE" VALUES (1, 'first', 'a'), (2, 'second', 'b');
+
+query T
+SELECT column_name FROM information_schema.columns
+WHERE table_catalog = 'pm' AND table_schema = 'MiXeD' AND table_name = 'TaBlE'
+ORDER BY ordinal_position;
+----
+Key
+Payload
+Part
+
+query IT
+SELECT key, payload FROM pm."MiXeD"."TaBlE" WHERE part = 'b' AND key BETWEEN 1 AND 2;
+----
+2	second
+
+query IT
+SELECT "Key", "Payload" FROM paimon_scan('{TEST_DIR}/host_compatibility/MiXeD.db/TaBlE',
+    SNAPSHOT_FROM_ID=1, DEBUG_EXPECTED_SPLITS=2) ORDER BY "Key";
+----
+1	first
+2	second
+
+statement error
+SELECT * FROM paimon_scan('{TEST_DIR}/host_compatibility/MiXeD.db/TaBlE', unknown_option=1);
+----
+Invalid named parameter
+
+statement ok
+DROP TABLE pm."MiXeD"."TaBlE";
+
+statement ok
+DROP SCHEMA pm."MiXeD";
+
+statement ok
+DETACH pm;

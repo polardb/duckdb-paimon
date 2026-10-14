@@ -123,18 +123,15 @@ PaimonTablePath PaimonTablePath::Parse(const vector<Value> &inputs) {
 }
 
 void PaimonFunctions::RegisterTableFunction(ExtensionLoader &loader, CreateTableFunctionInfo info) {
-	auto name = info.name;
-	loader.RegisterFunction(std::move(info));
-	auto &entry = loader.GetTableFunction(name);
-
-	for (idx_t i = 0; i < entry.functions.Size(); i++) {
-		// Match the copy used by duckdb_functions() to generate parameter types.
-		auto fun = entry.functions.GetFunctionByOffset(i);
-		auto &desc = entry.descriptions[i];
-		for (const auto &param : fun.named_parameters) {
-			desc.parameter_names.push_back(param.first);
+	idx_t i = 0;
+	info.functions.ApplyToFunctions([&](TableFunction &function) {
+		auto &signature = function.GetSignature();
+		auto &description = info.descriptions[i++];
+		for (idx_t parameter = 0; parameter < signature.GetPositionalParameterCount(); parameter++) {
+			signature.GetParameter(parameter).SetName(Identifier(description.parameter_names[parameter]));
 		}
-	}
+	});
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

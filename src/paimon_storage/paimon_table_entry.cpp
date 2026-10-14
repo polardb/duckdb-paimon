@@ -29,6 +29,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 
 #include "paimon_catalog.hpp"
@@ -37,7 +38,7 @@
 namespace duckdb {
 
 PaimonTableEntry::PaimonTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info)
-    : TableCatalogEntry(catalog, schema, info) {
+    : TableCatalogEntry(catalog, schema, info), columns(std::move(info.columns)) {
 }
 
 unique_ptr<BaseStatistics> PaimonTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -61,20 +62,21 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 	}
 	auto &function_set = catalog_entry->Cast<TableFunctionCatalogEntry>();
 
-	auto scan_function = function_set.functions.GetFunctionByArguments(
+	auto definition = function_set.functions.GetFunctionByArguments(
 	    context, {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR});
+	BoundTableFunction scan_function(definition);
 
 	vector<Value> inputs = {Value(catalog.GetDBPath()), Value(schema.name), Value(name)};
 
-	named_parameter_map_t param_map;
+	named_argument_map_t param_map;
 	auto &paimon_catalog = catalog.Cast<PaimonCatalog>();
 	for (const auto &entry : paimon_catalog.GetAttachOptions()) {
-		param_map[entry.first] = entry.second;
+		param_map[Identifier(entry.first)] = entry.second;
 	}
 
 	auto at_clause = lookup_info.GetAtClause();
 	if (at_clause) {
-		auto unit = StringUtil::Upper(at_clause->Unit());
+		auto unit = StringUtil::Upper(at_clause->Unit().GetIdentifierName());
 		if (unit == "VERSION") {
 			param_map["snapshot_from_id"] = at_clause->GetValue().CastAs(context, LogicalType::BIGINT);
 		} else if (unit == "TIMESTAMP") {
@@ -86,7 +88,7 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 	}
 
 	vector<LogicalType> return_types;
-	vector<string> names;
+	vector<Identifier> names;
 	TableFunctionRef empty_ref;
 
 	TableFunctionBindInput bind_input(inputs, param_map, return_types, names, nullptr, nullptr, scan_function,
@@ -98,7 +100,7 @@ TableFunction PaimonTableEntry::GetScanFunction(ClientContext &context, unique_p
 		    "Paimon catalog schema changed; detach and reattach the catalog before querying this table");
 	}
 
-	return scan_function;
+	return *definition;
 }
 
 TableStorageInfo PaimonTableEntry::GetStorageInfo(ClientContext &context) {

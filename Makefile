@@ -9,6 +9,14 @@ ENABLE_EXTENSION_AUTOINSTALL ?= 1
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
+# A missing Paimon build must fail instead of skipping every SQLLogicTest.
+test_release_internal:
+	./build/release/test/unittest --require paimon --warn NoTests "$(TESTS_BASE_DIRECTORY)*"
+test_debug_internal:
+	./build/debug/test/unittest --require paimon --warn NoTests "$(TESTS_BASE_DIRECTORY)*"
+test_reldebug_internal:
+	./build/relwithdebinfo/test/unittest --require paimon --warn NoTests "$(TESTS_BASE_DIRECTORY)*"
+
 # Exercise retained bindings alongside SQLLogicTests in local and CI entry points.
 .PHONY: test_snapshot_binding_release test_snapshot_binding_debug test_snapshot_binding_reldebug
 test_release_internal: test_snapshot_binding_release

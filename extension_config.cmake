@@ -4,6 +4,7 @@
 duckdb_extension_load(paimon
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
 )
+duckdb_extension_statically_link(paimon)
 
 # Any extra extensions that should be built
 # e.g.: duckdb_extension_load(json)

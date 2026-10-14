@@ -24,6 +24,8 @@
 
 #include "paimon_extension.hpp"
 #include "paimon_functions.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/function/partition_stats.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parallel/thread_context.hpp"
@@ -58,34 +60,34 @@ static void SQL(Connection &connection, const string &sql) {
 enum class Entry { PATH, THREE_PART, CATALOG };
 
 struct BoundScan {
-	TableFunction function;
+	BoundTableFunction function;
 	unique_ptr<FunctionData> data;
 	vector<LogicalType> types;
-	vector<string> names;
+	vector<Identifier> names;
 };
 
 // Retain the registered callback's binding while a separate writer commits.
 // SQL PREPARE/EXECUTE may rebind and cannot establish this contract by itself.
 static BoundScan Bind(Connection &reader, const string &warehouse, Entry entry, const string &table = "t",
-                      named_parameter_map_t parameters = {}) {
+                      named_argument_map_t parameters = {}) {
 	reader.BeginTransaction();
 	try {
 		BoundScan bound;
 		auto &context = *reader.context;
 		if (entry == Entry::CATALOG) {
-			EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, table);
+			EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, Identifier(table));
 			auto &catalog_entry = Catalog::GetEntry(context, "pm", "race", lookup).Cast<TableCatalogEntry>();
 			bound.types = catalog_entry.GetTypes();
-			bound.names = catalog_entry.GetColumns().GetColumnNames();
-			bound.function = catalog_entry.GetScanFunction(context, bound.data);
+			bound.names = StringsToIdentifiers(catalog_entry.GetColumns().GetColumnNames());
+			bound.function = BoundTableFunction(catalog_entry.GetScanFunction(context, bound.data));
 		} else {
 			vector<Value> args = entry == Entry::PATH ? vector<Value> {Value(warehouse + "/race.db/" + table)}
 			                                          : vector<Value> {Value(warehouse), Value("race"), Value(table)};
 			vector<LogicalType> argument_types(args.size(), LogicalType::VARCHAR);
 			auto info = PaimonFunctions::GetPaimonScanFunction();
-			bound.function = info.functions.GetFunctionByArguments(context, argument_types);
+			bound.function = BoundTableFunction(info.functions.GetFunctionByArguments(context, argument_types));
 			vector<LogicalType> input_types;
-			vector<string> input_names;
+			vector<Identifier> input_names;
 			TableFunctionRef ref;
 			TableFunctionBindInput input(args, parameters, input_types, input_names, nullptr, nullptr, bound.function,
 			                             ref);
@@ -162,14 +164,14 @@ static void ExpectRows(const Rows &actual, const Rows &expected) {
 }
 
 static void PushEqual(Connection &reader, BoundScan &bound, idx_t column, int value) {
-	LogicalGet get(0, bound.function, nullptr, bound.types, bound.names);
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 	for (idx_t i = 0; i < bound.types.size(); i++) {
 		get.AddColumnId(i);
 	}
 	vector<unique_ptr<Expression>> filters;
-	filters.push_back(make_uniq<BoundComparisonExpression>(
+	filters.push_back(BoundComparisonExpression::Create(
 	    ExpressionType::COMPARE_EQUAL,
-	    make_uniq<BoundColumnRefExpression>(bound.types[column], ColumnBinding(0, column)),
+	    make_uniq<BoundColumnRefExpression>(bound.types[column], ColumnBinding(TableIndex(0), ProjectionIndex(column))),
 	    make_uniq<BoundConstantExpression>(Value(value))));
 	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
 	INFO("DuckDB residual filter was removed");
@@ -322,7 +324,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch historical schema", "[p
 	// retains the historical schema required to map the stored columns.
 	std::filesystem::rename(path + "/schema/schema-0", warehouse + "/hidden-main-schema-0");
 	auto dev = Bind(reader, warehouse, entry, "branch_history$branch_dev");
-	REQUIRE(dev.names == vector<string> {"old", "id", "discard"});
+	REQUIRE(dev.names == vector<Identifier> {"old", "id", "discard"});
 	REQUIRE(Count(reader, dev) == 1);
 	ExpectRows(Read(reader, dev), {{Value("before"), Value(1), Value::BIGINT(10)}});
 	// Prove the fixture actually requires historical schema lookup. The latest
@@ -369,7 +371,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: branch selector overrides", "[
 	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
 	CopyBranch(warehouse + "/race.db/t");
 	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20)");
-	named_parameter_map_t parameters;
+	named_argument_map_t parameters;
 	parameters["snapshot_from_id"] = Value::BIGINT(1);
 	auto historical = Bind(reader, warehouse, entry, "t$branch_dev", parameters);
 	REQUIRE(Count(reader, historical) == 1);
@@ -454,7 +456,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: mode", "[paimon][snapshot_bind
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_selector"), Catch::Contains("requires a matching"));
 	if (entry != Entry::CATALOG) {
 		SQL(writer, "CREATE TABLE pm.race.conflicting_time (id INTEGER) WITH ('scan.timestamp'='2099-01-01')");
-		named_parameter_map_t parameters;
+		named_argument_map_t parameters;
 		parameters["snapshot_from_timestamp"] = Value("2099-01-01").DefaultCastAs(LogicalType::TIMESTAMP);
 		REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "conflicting_time", parameters),
 		                    Catch::Contains("cannot be set at the same time"));
@@ -678,13 +680,14 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: indexed_schema", "[paimon][sna
 	std::filesystem::copy_file(schema_fixtures + "/index-schema-1.json", path + "/schema/schema-1");
 	auto bound = Bind(reader, warehouse, entry, "indexed");
 	INFO("unexpected indexed fixture schema");
-	REQUIRE(bound.names == vector<string> {"idx", "payload", "part", "other"});
-	LogicalGet get(0, bound.function, nullptr, bound.types, bound.names);
+	REQUIRE(bound.names == vector<Identifier> {"idx", "payload", "part", "other"});
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 	for (idx_t i = 0; i < bound.types.size(); i++) {
 		get.AddColumnId(i);
 	}
 	auto predicate = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
-	predicate->children.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 3)));
+	predicate->GetChildrenMutable().push_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(3))));
 	vector<unique_ptr<Expression>> filters;
 	filters.push_back(std::move(predicate));
 	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
@@ -723,7 +726,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: timestamp", "[paimon][snapshot
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART);
 	CAPTURE(static_cast<int>(entry), warehouse);
 	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
-	named_parameter_map_t parameters;
+	named_argument_map_t parameters;
 	parameters["snapshot_from_timestamp"] = Value("2099-01-01").DefaultCastAs(LogicalType::TIMESTAMP);
 	auto bound = Bind(reader, warehouse, entry, "t", parameters);
 	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20)");

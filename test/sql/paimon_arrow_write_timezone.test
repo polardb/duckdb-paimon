@@ -107,12 +107,12 @@ INSERT INTO pm.d.timestamps (id, r, part) VALUES (5, {'ts': NULL}, 'p0');
 ----
 not nullable while data have null value
 
-# Scaling microseconds to nanoseconds must reject overflow before writing.
+# DuckDB v2 rejects overflow when converting to the table's nanosecond type, before writing.
 statement error
 INSERT INTO pm.d.timestamps (id, nanos, r, part) VALUES
     (5, TIMESTAMPTZ '3000-01-01 00:00:00+00', {'ts': TIMESTAMPTZ '1970-01-01 00:00:00+00'}, 'p0');
 ----
-out of bounds
+Could not convert Timestamp to higher precision
 
 query I
 SELECT count(*) FROM pm.d.timestamps;

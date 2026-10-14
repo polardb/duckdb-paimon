@@ -239,6 +239,12 @@ SELECT count(*) FROM rest_paimon.your_db.your_table;
 
 ### Building
 
+The `main` branch uses DuckDB development revision
+`88ecd0a49d7d3d838e002b2fbc0ce91ccf74110e`. Build and load the extension with
+the matching DuckDB source and host; development revisions do not have a stable
+C++ ABI. The `v1.5-variegata` and `v1.4-andium` branches target the corresponding
+released DuckDB versions.
+
 Clone the repository with submodules:
 
 ```shell
