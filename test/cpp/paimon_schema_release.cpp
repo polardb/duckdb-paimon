@@ -20,12 +20,12 @@
 #include <type_traits>
 
 namespace {
-bool inject_failure = false;
-int acquired = 0;
-int released = 0;
-int deleted = 0;
-const void *exported_shell = nullptr;
-void (*producer_release)(ArrowSchema *) = nullptr;
+thread_local bool inject_failure = false;
+thread_local int acquired = 0;
+thread_local int released = 0;
+thread_local int deleted = 0;
+thread_local const void *exported_shell = nullptr;
+thread_local void (*producer_release)(ArrowSchema *) = nullptr;
 constexpr const char *failure = "injected Paimon schema conversion failure";
 
 void TrackRelease(ArrowSchema *schema) {

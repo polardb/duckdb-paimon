@@ -14,6 +14,9 @@ release and shell deletion, and checks subsequent host liveness. Sized and
 unsized delete wrappers observe only the exported shell's exact address and
 forward every call to the real allocator. The wrappers are linked only into
 this test executable, never either production extension library.
+Observation state is thread-local: the exported root is released and its shell
+deleted synchronously in the binder frame; unrelated worker deletes are not
+observed.
 
 After building, the focused test is:
 
