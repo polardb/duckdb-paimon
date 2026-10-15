@@ -145,6 +145,7 @@ Rows ReadRows(const RootBatch &root) {
 	REQUIRE(schema.release);
 	REQUIRE(std::string(schema.format) == "+s");
 	REQUIRE(array.offset == 0);
+	REQUIRE(array.null_count == 0);
 	REQUIRE(array.length > 0);
 	REQUIRE(array.length <= 2);
 	REQUIRE(array.n_children == 3);
@@ -315,7 +316,10 @@ TEST_CASE("Paimon native missing data is an error, not EOF", "[paimon][native_re
 		} else {
 			read.reader.reset(std::move(opened).value().release());
 			auto next = read.reader->NextBatch();
-			REQUIRE_FALSE(next.ok());
+			if (next.ok()) {
+				RootBatch unexpected(std::move(next).value());
+				FAIL("Missing data unexpectedly produced a successful batch or EOF");
+			}
 			error = next.status();
 		}
 		INFO(error.ToString());
