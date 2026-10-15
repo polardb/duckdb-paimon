@@ -227,7 +227,7 @@ target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 
 if(BUILD_UNITTESTS)
-  # Consumer links DuckDB only and LOADs the real producer extension.
+  # Same contracts run on the default built-in host and the DONT_LINK test host.
   add_executable(unittest_paimon_bridge EXCLUDE_FROM_ALL
     test/cpp/main.cpp test/cpp/paimon_bound_read_bridge.cpp
     test/cpp/paimon_read_bridge_c.c)
@@ -235,6 +235,7 @@ if(BUILD_UNITTESTS)
     ${CMAKE_SOURCE_DIR}/third_party/catch)
   target_link_libraries(unittest_paimon_bridge duckdb ${CMAKE_DL_LIBS})
   target_compile_definitions(unittest_paimon_bridge PRIVATE
+    PAIMON_BRIDGE_BUILTIN=$<BOOL:${DUCKDB_EXTENSION_PAIMON_SHOULD_LINK}>
     PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
     PAIMON_BRIDGE_EXTENSION_PATH="$<TARGET_FILE:${TARGET_NAME}_loadable_extension>")
   add_dependencies(unittest_paimon_bridge ${TARGET_NAME}_loadable_extension)
