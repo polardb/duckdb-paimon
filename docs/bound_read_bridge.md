@@ -58,12 +58,23 @@ catalog, type or scan mode.
 `make test_release`, `make test_debug` and `make test_reldebug` include
 `paimon_check_bound_read_bridge`. It builds a consumer linked only to DuckDB and
 LOADs the real Paimon dynamic extension. No Paimon or Arrow C++ library is linked
-into the consumer. The public C header is also compiled as C.
+directly into the consumer. On Linux/macOS the test also checks that the callback
+address belongs to the loaded extension, not a built-in provider. The public C
+header is compiled as C.
 
 The focused target can be run from an existing build:
 
 ```sh
 cmake --build build/release --target paimon_check_bound_read_bridge
+```
+
+For a host with no statically linked Paimon at all, configure a separate build
+with the tracked dynamic-only extension configuration (plus the platform's usual
+native dependency/toolchain options):
+
+```sh
+cmake -S duckdb -B build/bridge -DDUCKDB_EXTENSION_CONFIGS="$PWD/test/extension_config_bridge.cmake"
+cmake --build build/bridge --target paimon_check_bound_read_bridge
 ```
 
 The tests check all three scan entry points, retained snapshot/options after the

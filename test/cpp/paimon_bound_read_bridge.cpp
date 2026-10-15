@@ -23,6 +23,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <type_traits>
+#if defined(__unix__) || defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 
 using namespace duckdb;
 
@@ -131,6 +134,12 @@ struct BridgeFixture {
 		REQUIRE(info->api.magic == PAIMON_READ_BRIDGE_MAGIC);
 		REQUIRE(info->api.version == PAIMON_READ_BRIDGE_VERSION);
 		REQUIRE(info->api.struct_size == sizeof(PaimonReadBridgeV1));
+#if defined(__unix__) || defined(__APPLE__)
+		Dl_info origin {};
+		REQUIRE(dladdr(reinterpret_cast<const void *>(info->api.retain), &origin) != 0);
+		REQUIRE(origin.dli_fname);
+		REQUIRE(std::filesystem::equivalent(origin.dli_fname, PAIMON_BRIDGE_EXTENSION_PATH));
+#endif
 		return info->api;
 	}
 
@@ -185,6 +194,60 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: empty is not latest", "[paimon][
 	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 10)");
 	REQUIRE(empty.View().has_snapshot == 0);
 	REQUIRE(empty.View().snapshot_id == 0);
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained schema identity", "[paimon][bound_read_bridge]") {
+	auto entry = GENERATE(0, 1, 2);
+	auto path = warehouse + "/race.db/evolution";
+	std::filesystem::copy(string(PAIMON_FIXTURE_DIR) + "/schema_evolution.db/mixed_types", path,
+	                      std::filesystem::copy_options::recursive);
+	auto published = path + "/schema/schema-1";
+	auto staged = warehouse + "/staged-schema-1";
+	std::filesystem::rename(published, staged);
+	auto bound = Bind(entry, "evolution");
+	auto &api = API(bound);
+	Descriptor old(api);
+	Retain(bound, old);
+	auto schema = Text(old.View().schema_json);
+	REQUIRE(old.View().schema_id == 0);
+	bound.data.reset();
+	std::filesystem::rename(staged, published);
+	SQL(*reader, "DETACH pm");
+	SQL(*reader, "ATTACH " + Value(warehouse).ToSQLString() + " AS pm (TYPE paimon)");
+	auto fresh_bound = Bind(entry, "evolution");
+	Descriptor fresh(api);
+	Retain(fresh_bound, fresh);
+	REQUIRE(fresh.View().schema_id == 1);
+	REQUIRE(Text(fresh.View().schema_json) != schema);
+	REQUIRE(Text(old.View().schema_json) == schema);
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: explicit branch is preserved", "[paimon][bound_read_bridge]") {
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 10)");
+	auto path = warehouse + "/race.db/t";
+	auto branch = path + "/branch/branch-dev";
+	std::filesystem::create_directories(branch);
+	std::filesystem::copy(path + "/schema", branch + "/schema", std::filesystem::copy_options::recursive);
+	std::filesystem::copy(path + "/snapshot", branch + "/snapshot", std::filesystem::copy_options::recursive);
+	auto bound = Bind(GENERATE(0, 1, 2), "t$branch_dev");
+	auto &api = API(bound);
+	Descriptor descriptor(api);
+	Retain(bound, descriptor);
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (2, 20)");
+	REQUIRE(Text(descriptor.View().branch) == "dev");
+	REQUIRE(descriptor.View().snapshot_id == 1);
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: singleton across databases and overloads",
+                 "[paimon][bound_read_bridge]") {
+	auto path = Bind(0);
+	auto three = Bind(1);
+	auto catalog = Bind(2);
+	BridgeFixture other;
+	auto independent = other.Bind();
+	REQUIRE(path.function.function_info == three.function.function_info);
+	REQUIRE(path.function.function_info == catalog.function.function_info);
+	REQUIRE(path.function.function_info == independent.function.function_info);
 }
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: descriptor does not access manifests", "[paimon][bound_read_bridge]") {
