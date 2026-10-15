@@ -10,7 +10,9 @@ On Linux, the normal `make test_release` callback prerequisite also runs a
 dedicated schema-ownership executable. It uses GNU linker wrapping of the pinned
 DuckDB conversion symbol to exercise the real Paimon bind callback, checks the
 normal query, injects a conversion error after export, counts complete root
-release, and checks subsequent host liveness. The wrapper is linked only into
+release and shell deletion, and checks subsequent host liveness. Sized and
+unsized delete wrappers observe only the exported shell's exact address and
+forward every call to the real allocator. The wrappers are linked only into
 this test executable, never either production extension library.
 
 After building, the focused test is:

@@ -16,12 +16,15 @@
 #include "catch.hpp"
 
 #include <string>
+#include <cstddef>
 #include <type_traits>
 
 namespace {
 bool inject_failure = false;
 int acquired = 0;
 int released = 0;
+int deleted = 0;
+const void *exported_shell = nullptr;
 void (*producer_release)(ArrowSchema *) = nullptr;
 constexpr const char *failure = "injected Paimon schema conversion failure";
 
@@ -41,6 +44,28 @@ struct ScopedFailure {
 };
 } // namespace
 
+extern "C" void RealDelete(void *) noexcept asm("__real__ZdlPv");
+extern "C" void WrappedDelete(void *) noexcept asm("__wrap__ZdlPv");
+extern "C" void RealSizedDelete(void *, std::size_t) noexcept asm("__real__ZdlPvm");
+extern "C" void WrappedSizedDelete(void *, std::size_t) noexcept asm("__wrap__ZdlPvm");
+
+static void TrackDelete(void *pointer) noexcept {
+	if (pointer && pointer == exported_shell) {
+		deleted++;
+		exported_shell = nullptr;
+	}
+}
+
+extern "C" void WrappedDelete(void *pointer) noexcept {
+	TrackDelete(pointer);
+	RealDelete(pointer);
+}
+
+extern "C" void WrappedSizedDelete(void *pointer, std::size_t bytes) noexcept {
+	TrackDelete(pointer);
+	RealSizedDelete(pointer, bytes);
+}
+
 // GNU --wrap intercepts the real bind callback's external conversion call, not
 // a copied binder.
 extern "C" void RealPopulate(duckdb::ClientContext &, duckdb::ArrowTableSchema &,
@@ -58,6 +83,7 @@ extern "C" void WrappedPopulate(duckdb::ClientContext &context, duckdb::ArrowTab
 		throw duckdb::InvalidInputException("fault probe received a released schema");
 	}
 	acquired++;
+	exported_shell = &schema;
 	producer_release = schema.release;
 	const_cast<ArrowSchema &>(schema).release = TrackRelease;
 	if (inject_failure) {
@@ -82,8 +108,9 @@ TEST_CASE("Paimon binding releases exported schema on success and conversion fai
 	REQUIRE(rows->GetValue(0, 0).GetValue<int64_t>() == 9);
 	REQUIRE(acquired == 1);
 	REQUIRE(released == 1);
+	REQUIRE(deleted == 1);
 
-	acquired = released = 0;
+	acquired = released = deleted = 0;
 	std::string observed;
 	{
 		ScopedFailure fault;
@@ -104,6 +131,7 @@ TEST_CASE("Paimon binding releases exported schema on success and conversion fai
 	REQUIRE(observed.find(failure) != std::string::npos);
 	REQUIRE(acquired == 1);
 	REQUIRE(released == 1);
+	REQUIRE(deleted == 1);
 
 	auto alive = con.Query("SELECT 42");
 	REQUIRE_FALSE(alive->HasError());

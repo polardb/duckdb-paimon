@@ -256,7 +256,8 @@ if(BUILD_UNITTESTS)
     link_extension_libraries(unittest_paimon_schema_release "")
     link_threads(unittest_paimon_schema_release "")
     target_link_options(unittest_paimon_schema_release PRIVATE
-                        "LINKER:--wrap=${PAIMON_SCHEMA_POPULATE_SYMBOL}")
+                        "LINKER:--wrap=${PAIMON_SCHEMA_POPULATE_SYMBOL}"
+                        "LINKER:--wrap=_ZdlPv" "LINKER:--wrap=_ZdlPvm")
     add_custom_target(
       paimon_check_schema_release
       COMMAND
