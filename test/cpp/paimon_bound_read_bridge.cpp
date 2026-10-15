@@ -50,7 +50,25 @@ static void CheckSchema(const PaimonBoundReadViewV1 &view, const string &path) {
 	                                                               yyjson_doc_free);
 	REQUIRE(actual);
 	REQUIRE(oracle);
-	REQUIRE(yyjson_equals(yyjson_doc_get_root(actual.get()), yyjson_doc_get_root(oracle.get())));
+	auto actual_root = yyjson_doc_get_root(actual.get());
+	auto expected_root = yyjson_doc_get_root(oracle.get());
+	REQUIRE(yyjson_is_obj(actual_root));
+	REQUIRE(yyjson_is_obj(expected_root));
+	size_t index, count;
+	yyjson_val *key, *value;
+	size_t expected_count = yyjson_obj_size(expected_root);
+	yyjson_obj_foreach(expected_root, index, count, key, value) {
+		auto name = yyjson_get_str(key);
+		auto found = yyjson_obj_get(actual_root, name);
+		// Native TableSchema omits an absent optional comment when serializing.
+		if (string(name) == "comment" && yyjson_is_null(value) && !found) {
+			expected_count--;
+			continue;
+		}
+		INFO(name);
+		REQUIRE(yyjson_equals(found, value));
+	}
+	REQUIRE(yyjson_obj_size(actual_root) == expected_count);
 }
 
 static void SQL(Connection &con, const string &query) {
@@ -333,7 +351,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: invalid inputs fail closed", "[p
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: unsupported binding is not empty success",
                  "[paimon][bound_read_bridge]") {
-	SQL(*writer, "CREATE TABLE pm.race.unsupported (id INTEGER) WITH ('file.format'='avro')");
+	SQL(*writer, "CREATE TABLE pm.race.unsupported (id INTEGER PRIMARY KEY)");
 	auto bound = Bind(GENERATE(0, 1, 2), "unsupported");
 	auto &api = API(bound);
 	Descriptor descriptor(api);
