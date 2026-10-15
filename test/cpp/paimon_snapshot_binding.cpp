@@ -27,6 +27,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types/vector_buffer.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -47,6 +48,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <thread>
 
 using namespace duckdb;
 
@@ -111,6 +113,13 @@ static idx_t Count(Connection &reader, BoundScan &bound) {
 }
 
 using Rows = vector<vector<Value>>;
+
+static void RequireNoArrowOwner(Vector &column) {
+	auto buffer = column.GetBuffer();
+	REQUIRE(buffer);
+	auto *auxiliary = buffer->GetAuxiliaryData();
+	REQUIRE((!auxiliary || auxiliary->type != VectorAuxiliaryDataType::ARROW_AUXILIARY));
+}
 
 static Rows Read(Connection &reader, BoundScan &bound, bool partial = false) {
 	vector<column_t> columns;
@@ -202,6 +211,68 @@ static void CheckColumnSignatures() {
 	REQUIRE(signature(nested) != signature(changed));
 }
 
+struct OutputAllocationState {
+	const std::thread::id owner = std::this_thread::get_id();
+	std::atomic<idx_t> live_bytes {0};
+	bool armed = false;
+	idx_t attempts = 0;
+	idx_t fail_at = 0;
+	idx_t refused = 0;
+
+	void BeforeAllocation() {
+		// Other database workers only participate in atomic backing accounting.
+		if (std::this_thread::get_id() != owner || !armed) {
+			return;
+		}
+		if (++attempts == fail_at) {
+			refused++;
+			throw OutOfMemoryException("injected Paimon output allocation refusal");
+		}
+	}
+};
+
+struct OutputAllocatorData : PrivateAllocatorData {
+	explicit OutputAllocatorData(std::shared_ptr<OutputAllocationState> state) : state(std::move(state)) {
+	}
+	std::shared_ptr<OutputAllocationState> state;
+
+	static data_ptr_t Allocate(PrivateAllocatorData *data, idx_t bytes) {
+		auto &state = *data->Cast<OutputAllocatorData>().state;
+		state.BeforeAllocation();
+		auto result = Allocator::DefaultAllocate(nullptr, bytes);
+		if (result) {
+			state.live_bytes.fetch_add(bytes, std::memory_order_relaxed);
+		}
+		return result;
+	}
+	static void Free(PrivateAllocatorData *data, data_ptr_t pointer, idx_t bytes) {
+		Allocator::DefaultFree(nullptr, pointer, bytes);
+		data->Cast<OutputAllocatorData>().state->live_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+	}
+	static data_ptr_t Reallocate(PrivateAllocatorData *data, data_ptr_t pointer, idx_t old_bytes, idx_t bytes) {
+		auto &state = *data->Cast<OutputAllocatorData>().state;
+		state.BeforeAllocation();
+		auto result = Allocator::DefaultReallocate(nullptr, pointer, old_bytes, bytes);
+		if (result) {
+			state.live_bytes.fetch_add(bytes, std::memory_order_relaxed);
+			state.live_bytes.fetch_sub(old_bytes, std::memory_order_relaxed);
+		}
+		return result;
+	}
+};
+
+struct OutputRefusalScope {
+	OutputAllocationState &state;
+	OutputRefusalScope(OutputAllocationState &state, idx_t fail_at) : state(state) {
+		state.attempts = state.refused = 0;
+		state.fail_at = fail_at;
+		state.armed = true;
+	}
+	~OutputRefusalScope() {
+		state.armed = false;
+	}
+};
+
 struct BindingFixture {
 	DuckDB db;
 	Connection reader;
@@ -211,7 +282,7 @@ struct BindingFixture {
 	const string schema_fixtures = PAIMON_SCHEMA_FIXTURE_DIR;
 	const string native_fixtures = PAIMON_NATIVE_FIXTURE_DIR;
 
-	BindingFixture() : db(nullptr), reader(db), writer(db) {
+	BindingFixture(DBConfig *config = nullptr) : db(nullptr, config), reader(db), writer(db) {
 		db.LoadStaticExtension<PaimonExtension>();
 		static std::atomic<uint64_t> next_id {0};
 		const auto *root = std::getenv("PAIMON_TEST_ROOT");
@@ -235,14 +306,29 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 	    GENERATE(OutputBoundary::NEXT_BATCH, OutputBoundary::EOF_BATCH, OutputBoundary::LOCAL_TEARDOWN);
 	const auto format = GENERATE(string("parquet"), string("orc"));
 	CAPTURE(static_cast<int>(entry), static_cast<int>(boundary), format);
-	SQL(writer,
-	    "CREATE TABLE pm.race.owned WITH ('file.format'='" + format +
-	        "') AS SELECT "
-	        "i::INTEGER id, CASE WHEN i%3=0 THEN NULL ELSE 'long-string-payload-noninline-'||i END s, "
-	        "('long-binary-payload-noninline-'||i)::BLOB b, (i*1.25)::DECIMAL(18,2) d, "
-	        "CASE WHEN i%4=0 THEN NULL ELSE ['long-nested-payload-noninline-'||i,NULL,''] END l, "
-	        "CASE WHEN i%5=0 THEN NULL ELSE {'a':'long-struct-payload-noninline-'||i,'b':[i::INTEGER,NULL]} END r, "
-	        "MAP {'key':[i::INTEGER,NULL]} m FROM range(5000) v(i)");
+	const string rows_sql =
+	    "SELECT "
+	    "i::INTEGER id, CASE WHEN i%3=0 THEN NULL ELSE 'long-string-payload-noninline-'||i END s, "
+	    "('long-binary-payload-noninline-'||i)::BLOB b, (i*1.25)::DECIMAL(18,2) d, "
+	    "CASE WHEN i%4=0 THEN NULL ELSE ['long-nested-payload-noninline-'||i,NULL,''] END l, "
+	    "CASE WHEN i%5=0 THEN NULL ELSE {'a':'long-struct-payload-noninline-'||i,'b':[i::INTEGER,NULL]} END r, "
+	    "MAP {'key':[i::INTEGER,NULL]} m, CASE WHEN i<2500 THEN 0 ELSE 1 END p FROM range(5000) v(i)";
+	SQL(writer, "CREATE TABLE pm.race.owned PARTITIONED BY (p) WITH ('file.format'='" + format + "') AS " + rows_sql);
+	SQL(writer, "SELECT id FROM paimon_scan(" + Value(warehouse + "/race.db/owned").ToSQLString() +
+	                ", debug_expected_splits=2) LIMIT 1");
+	auto oracle = writer.Query(rows_sql + " ORDER BY id");
+	REQUIRE_FALSE(oracle->HasError());
+	Rows authored;
+	while (auto rows = oracle->Fetch()) {
+		for (idx_t row = 0; row < rows->size(); row++) {
+			vector<Value> values;
+			for (idx_t col = 0; col < rows->ColumnCount(); col++) {
+				values.push_back(rows->GetValue(col, row));
+			}
+			authored.push_back(std::move(values));
+		}
+	}
+	REQUIRE(authored.size() == 5000);
 	auto bound = Bind(reader, warehouse, entry, "owned");
 	vector<column_t> columns;
 	for (idx_t col = 0; col < bound.types.size(); col++) {
@@ -263,19 +349,20 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 	next();
 	REQUIRE(output.size() > 0);
 	REQUIRE(output.size() < 5000);
+	REQUIRE(output.ColumnCount() == authored.front().size());
 	// A shallow publication still carries the producer's Arrow owner. A deep
 	// copy owns DuckDB buffers and does not rely on deferred native destruction.
-	auto buffer = output.data[0].GetBuffer();
-	REQUIRE(buffer);
-	auto *auxiliary = buffer->GetAuxiliaryData();
-	REQUIRE((!auxiliary || auxiliary->type != VectorAuxiliaryDataType::ARROW_AUXILIARY));
+	RequireNoArrowOwner(output.data[0]);
 	Rows expected;
 	for (idx_t row = 0; row < output.size(); row++) {
-		vector<Value> values;
+		const auto id = output.GetValue(0, row).GetValue<int32_t>();
+		REQUIRE((id >= 0 && id < 5000));
 		for (idx_t col = 0; col < output.ColumnCount(); col++) {
-			values.push_back(output.GetValue(col, row));
+			const auto value = output.GetValue(col, row);
+			REQUIRE(value.type() == authored[id][col].type());
+			REQUIRE(Value::NotDistinctFrom(value, authored[id][col]));
 		}
-		expected.push_back(std::move(values));
+		expected.push_back(authored[id]);
 	}
 	DataChunk held;
 	held.Initialize(Allocator::Get(*reader.context), bound.types);
@@ -291,15 +378,25 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 		REQUIRE(output.size() > 0);
 	} else if (boundary == OutputBoundary::EOF_BATCH) {
 		idx_t total = expected.size();
+		bool partition_seen[2] = {false, false};
+		const auto first_partition = expected[0].back().GetValue<int32_t>();
+		REQUIRE((first_partition == 0 || first_partition == 1));
+		partition_seen[first_partition] = true;
 		for (idx_t calls = 0; calls < 5001; calls++) {
 			next();
 			total += output.size();
+			for (idx_t row = 0; row < output.size(); row++) {
+				const auto partition = output.GetValue(output.ColumnCount() - 1, row).GetValue<int32_t>();
+				REQUIRE((partition == 0 || partition == 1));
+				partition_seen[partition] = true;
+			}
 			if (!output.size()) {
 				break;
 			}
 		}
 		REQUIRE(output.size() == 0);
 		REQUIRE(total == 5000);
+		REQUIRE((partition_seen[0] && partition_seen[1]));
 	} else {
 		local.reset();
 	}
@@ -321,6 +418,114 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 	bound.data.reset();
 	compare();
 	SQL(reader, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon zero-column callbacks preserve row counts", "[paimon][scan_output]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,2),(3,4),(5,6),(7,8),(9,10)");
+	auto bound = Bind(reader, warehouse, entry);
+	vector<column_t> columns;
+	TableFunctionInitInput init(bound.data.get(), columns, {}, nullptr);
+	auto global = bound.function.init_global(*reader.context, init);
+	ThreadContext thread(*reader.context);
+	ExecutionContext execution(*reader.context, thread, nullptr);
+	auto local = bound.function.init_local(execution, init, global.get());
+	DataChunk output;
+	output.Initialize(Allocator::Get(*reader.context), {});
+	idx_t total = 0;
+	for (idx_t calls = 0; calls < 6; calls++) {
+		output.Reset();
+		TableFunctionInput input(bound.data.get(), local.get(), global.get());
+		bound.function.function(*reader.context, input, output);
+		REQUIRE(output.ColumnCount() == 0);
+		total += output.size();
+		if (!output.size()) {
+			break;
+		}
+	}
+	REQUIRE(output.size() == 0);
+	REQUIRE(total == 5);
+}
+
+TEST_CASE("Paimon output allocation refusals leave retained values intact", "[paimon][scan_output]") {
+	auto state = std::make_shared<OutputAllocationState>();
+	{
+		DBConfig config;
+		config.allocator = make_uniq<Allocator>(OutputAllocatorData::Allocate, OutputAllocatorData::Free,
+		                                        OutputAllocatorData::Reallocate, make_uniq<OutputAllocatorData>(state));
+		BindingFixture fixture(&config);
+		SQL(fixture.writer, "CREATE TABLE pm.race.faulty AS SELECT i::INTEGER id, "
+		                    "'long-native-output-payload-'||i s FROM range(5000) t(i)");
+		auto exercise = [&](idx_t fail_at) {
+			CAPTURE(fail_at);
+			auto bound = Bind(fixture.reader, fixture.warehouse, Entry::PATH, "faulty");
+			vector<column_t> columns {0, 1};
+			TableFunctionInitInput init(bound.data.get(), columns, {}, nullptr);
+			auto global = bound.function.init_global(*fixture.reader.context, init);
+			ThreadContext thread(*fixture.reader.context);
+			ExecutionContext execution(*fixture.reader.context, thread, nullptr);
+			auto local = bound.function.init_local(execution, init, global.get());
+			DataChunk output;
+			output.Initialize(Allocator::Get(*fixture.reader.context), bound.types);
+			auto next = [&]() {
+				output.Reset();
+				TableFunctionInput input(bound.data.get(), local.get(), global.get());
+				bound.function.function(*fixture.reader.context, input, output);
+			};
+			next();
+			REQUIRE(output.size() > 0);
+			REQUIRE(output.ColumnCount() == 2);
+			RequireNoArrowOwner(output.data[0]);
+			DataChunk held;
+			held.Initialize(Allocator::Get(*fixture.reader.context), bound.types);
+			held.Reference(output);
+			vector<int32_t> ids;
+			for (idx_t row = 0; row < held.size(); row++) {
+				ids.push_back(held.GetValue(0, row).GetValue<int32_t>());
+				REQUIRE((ids.back() >= 0 && ids.back() < 5000));
+				REQUIRE(held.GetValue(1, row).GetValue<string>() ==
+				        "long-native-output-payload-" + std::to_string(ids.back()));
+			}
+			string error;
+			{
+				OutputRefusalScope scope(*state, fail_at);
+				try {
+					next();
+				} catch (const OutOfMemoryException &failure) {
+					error = failure.what();
+				}
+			}
+			const auto attempts = state->attempts;
+			if (fail_at) {
+				REQUIRE(state->refused == 1);
+				REQUIRE(attempts == fail_at);
+				REQUIRE(error.find("injected Paimon output allocation refusal") != string::npos);
+				REQUIRE(output.size() == 0);
+			} else {
+				REQUIRE(state->refused == 0);
+				REQUIRE(error.empty());
+				REQUIRE(output.size() > 0);
+			}
+			output.Destroy();
+			local.reset();
+			global.reset();
+			bound.data.reset();
+			REQUIRE(held.size() == ids.size());
+			for (idx_t row = 0; row < held.size(); row++) {
+				REQUIRE(held.GetValue(0, row).GetValue<int32_t>() == ids[row]);
+				REQUIRE(held.GetValue(1, row).GetValue<string>() ==
+				        "long-native-output-payload-" + std::to_string(ids[row]));
+			}
+			SQL(fixture.reader, "SELECT 42");
+			return attempts;
+		};
+		const auto attempts = exercise(0);
+		REQUIRE((attempts > 0 && attempts <= 64));
+		for (idx_t point = 1; point <= attempts; point++) {
+			exercise(point);
+		}
+	}
+	REQUIRE(state->live_bytes.load(std::memory_order_relaxed) == 0);
 }
 
 // Branches share data and manifests at the table root; only metadata is copied.

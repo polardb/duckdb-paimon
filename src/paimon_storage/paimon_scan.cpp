@@ -1138,8 +1138,9 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 	local_state.chunk = current_chunk;
 
 	auto output_size = MinValue<idx_t>(STANDARD_VECTOR_SIZE, NumericCast<idx_t>(c_array->length));
+	const auto output_types = output.GetTypes();
 	DataChunk converted;
-	converted.Initialize(Allocator::Get(context), output.GetTypes());
+	converted.Initialize(Allocator::Get(context), output_types);
 	converted.SetCardinality(output_size);
 
 	auto &arrow_types = global_state.arrow_table.GetColumns();
@@ -1158,10 +1159,13 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 		                                             arrow_type);
 	}
 
-	// Native roots can be released at the next read or local teardown. Published
-	// vectors must own their data, including nested values and string payloads.
-	converted.Copy(output);
-	output.Verify();
+	// Never publish the reusable output caches: Reset would overwrite retained
+	// references. Fresh owned buffers also detach nested values from native roots.
+	DataChunk owned;
+	owned.Initialize(Allocator::Get(context), output_types);
+	converted.Copy(owned);
+	owned.Verify();
+	output.Reference(owned);
 	return;
 }
 
