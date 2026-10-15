@@ -229,7 +229,7 @@ target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 if(BUILD_UNITTESTS)
   add_executable(
     unittest_paimon EXCLUDE_FROM_ALL
-    test/cpp/main.cpp test/cpp/paimon_read_target.cpp
+    test/cpp/main.cpp test/cpp/paimon_native_reader.cpp test/cpp/paimon_read_target.cpp
     test/cpp/paimon_snapshot_binding.cpp test/cpp/paimon_snapshot_resolver.cpp)
   target_compile_definitions(unittest_paimon
                              PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
