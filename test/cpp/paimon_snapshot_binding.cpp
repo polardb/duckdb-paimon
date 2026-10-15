@@ -25,6 +25,7 @@
 #include "paimon_extension.hpp"
 #include "paimon_functions.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/types/vector_buffer.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -225,6 +226,102 @@ struct BindingFixture {
 		SQL(writer, "CREATE TABLE pm.race.t (id INTEGER, value INTEGER)");
 	}
 };
+
+enum class OutputBoundary { NEXT_BATCH, EOF_BATCH, LOCAL_TEARDOWN };
+
+TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader boundaries", "[paimon][scan_output]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto boundary =
+	    GENERATE(OutputBoundary::NEXT_BATCH, OutputBoundary::EOF_BATCH, OutputBoundary::LOCAL_TEARDOWN);
+	const auto format = GENERATE(string("parquet"), string("orc"));
+	CAPTURE(static_cast<int>(entry), static_cast<int>(boundary), format);
+	SQL(writer,
+	    "CREATE TABLE pm.race.owned WITH ('file.format'='" + format +
+	        "') AS SELECT "
+	        "i::INTEGER id, CASE WHEN i%3=0 THEN NULL ELSE 'long-string-payload-noninline-'||i END s, "
+	        "('long-binary-payload-noninline-'||i)::BLOB b, (i*1.25)::DECIMAL(18,2) d, "
+	        "CASE WHEN i%4=0 THEN NULL ELSE ['long-nested-payload-noninline-'||i,NULL,''] END l, "
+	        "CASE WHEN i%5=0 THEN NULL ELSE {'a':'long-struct-payload-noninline-'||i,'b':[i::INTEGER,NULL]} END r, "
+	        "MAP {'key':[i::INTEGER,NULL]} m FROM range(5000) v(i)");
+	auto bound = Bind(reader, warehouse, entry, "owned");
+	vector<column_t> columns;
+	for (idx_t col = 0; col < bound.types.size(); col++) {
+		columns.push_back(col);
+	}
+	TableFunctionInitInput init(bound.data.get(), columns, {}, nullptr);
+	auto global = bound.function.init_global(*reader.context, init);
+	ThreadContext thread(*reader.context);
+	ExecutionContext execution(*reader.context, thread, nullptr);
+	auto local = bound.function.init_local(execution, init, global.get());
+	DataChunk output;
+	output.Initialize(Allocator::Get(*reader.context), bound.types);
+	auto next = [&]() {
+		output.Reset();
+		TableFunctionInput input(bound.data.get(), local.get(), global.get());
+		bound.function.function(*reader.context, input, output);
+	};
+	next();
+	REQUIRE(output.size() > 0);
+	REQUIRE(output.size() < 5000);
+	// A shallow publication still carries the producer's Arrow owner. A deep
+	// copy owns DuckDB buffers and does not rely on deferred native destruction.
+	auto buffer = output.data[0].GetBuffer();
+	REQUIRE(buffer);
+	auto *auxiliary = buffer->GetAuxiliaryData();
+	REQUIRE((!auxiliary || auxiliary->type != VectorAuxiliaryDataType::ARROW_AUXILIARY));
+	Rows expected;
+	for (idx_t row = 0; row < output.size(); row++) {
+		vector<Value> values;
+		for (idx_t col = 0; col < output.ColumnCount(); col++) {
+			values.push_back(output.GetValue(col, row));
+		}
+		expected.push_back(std::move(values));
+	}
+	DataChunk held;
+	held.Initialize(Allocator::Get(*reader.context), bound.types);
+	held.Reference(output);
+	vector<unique_ptr<Vector>> held_columns;
+	for (idx_t col = 0; col < output.ColumnCount(); col++) {
+		auto column = make_uniq<Vector>(bound.types[col]);
+		column->Reference(output.data[col]);
+		held_columns.push_back(std::move(column));
+	}
+	if (boundary == OutputBoundary::NEXT_BATCH) {
+		next();
+		REQUIRE(output.size() > 0);
+	} else if (boundary == OutputBoundary::EOF_BATCH) {
+		idx_t total = expected.size();
+		for (idx_t calls = 0; calls < 5001; calls++) {
+			next();
+			total += output.size();
+			if (!output.size()) {
+				break;
+			}
+		}
+		REQUIRE(output.size() == 0);
+		REQUIRE(total == 5000);
+	} else {
+		local.reset();
+	}
+	auto compare = [&]() {
+		REQUIRE(held.size() == expected.size());
+		for (idx_t row = 0; row < held.size(); row++) {
+			for (idx_t col = 0; col < held.ColumnCount(); col++) {
+				const auto value = held.GetValue(col, row);
+				REQUIRE(value.type() == expected[row][col].type());
+				REQUIRE(Value::NotDistinctFrom(value, expected[row][col]));
+				REQUIRE(Value::NotDistinctFrom(held_columns[col]->GetValue(row), expected[row][col]));
+			}
+		}
+	};
+	compare();
+	output.Destroy();
+	local.reset();
+	global.reset();
+	bound.data.reset();
+	compare();
+	SQL(reader, "SELECT 42");
+}
 
 // Branches share data and manifests at the table root; only metadata is copied.
 static string CopyBranch(const string &path, const string &branch = "dev") {
