@@ -229,10 +229,20 @@ TEST_CASE("Paimon bridge: missing dynamic producer cannot become success", "[pai
 	config.SetOptionByName("allow_unsigned_extensions", Value(true));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
-	auto result = con.Query("LOAD " + Value(string(PAIMON_BRIDGE_EXTENSION_PATH) + ".missing").ToSQLString());
+	auto catalog_absent = [&]() {
+		auto result = con.Query("SELECT count(*) FROM duckdb_functions() WHERE function_name='paimon_scan'");
+		REQUIRE_FALSE(result->HasError());
+		REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 0);
+	};
+	catalog_absent();
+	auto missing = std::filesystem::path(PAIMON_BRIDGE_EXTENSION_PATH).parent_path() /
+	               ("missing-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())) /
+	               "paimon.duckdb_extension";
+	REQUIRE_FALSE(std::filesystem::exists(missing));
+	auto result = con.Query("LOAD " + Value(missing.string()).ToSQLString());
 	REQUIRE(result->HasError());
-	result = con.Query("SELECT * FROM paimon_scan('missing')");
-	REQUIRE(result->HasError());
+	REQUIRE(result->GetError().find("not found") != string::npos);
+	catalog_absent();
 }
 #endif
 
