@@ -236,6 +236,38 @@ if(BUILD_UNITTESTS)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
     DEPENDS unittest_paimon
     USES_TERMINAL)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PAIMON_SCHEMA_POPULATE_SYMBOL
+        "_ZN6duckdb18ArrowTableFunction24PopulateArrowTableSchemaERNS_13ClientContextERNS_16ArrowTableSchemaERK11ArrowSchema"
+    )
+    add_executable(unittest_paimon_schema_release EXCLUDE_FROM_ALL
+                   test/cpp/main.cpp test/cpp/paimon_schema_release.cpp)
+    target_include_directories(unittest_paimon_schema_release
+                               PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
+    target_compile_definitions(
+      unittest_paimon_schema_release
+      PRIVATE PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+              PAIMON_SCHEMA_POPULATE_SYMBOL="${PAIMON_SCHEMA_POPULATE_SYMBOL}")
+    set_target_properties(
+      unittest_paimon_schema_release PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                                                "${CMAKE_BINARY_DIR}/test")
+    target_link_libraries(unittest_paimon_schema_release test_helpers
+                          duckdb_static ${EXTENSION_NAME})
+    link_extension_libraries(unittest_paimon_schema_release "")
+    link_threads(unittest_paimon_schema_release "")
+    target_link_options(unittest_paimon_schema_release PRIVATE
+                        "LINKER:--wrap=${PAIMON_SCHEMA_POPULATE_SYMBOL}")
+    add_custom_target(
+      paimon_check_schema_release
+      COMMAND
+        ${CMAKE_COMMAND}
+        "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon_schema_release>"
+        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/schema-release-test-work" -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+      DEPENDS unittest_paimon_schema_release
+      USES_TERMINAL)
+    add_dependencies(paimon_check_snapshot_binding paimon_check_schema_release)
+  endif()
 endif()
 if(APPLE)
   target_link_options(${EXTENSION_NAME} PUBLIC "SHELL:-framework Security"
