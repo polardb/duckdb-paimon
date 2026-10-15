@@ -223,7 +223,8 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: invalid inputs fail closed", "[p
 	api.release(nullptr);
 }
 
-TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: unsupported binding is not empty success", "[paimon][bound_read_bridge]") {
+TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: unsupported binding is not empty success",
+                 "[paimon][bound_read_bridge]") {
 	SQL(*writer, "CREATE TABLE pm.race.unsupported (id INTEGER) WITH ('file.format'='avro')");
 	auto bound = Bind(GENERATE(0, 1, 2), "unsupported");
 	auto &api = API(bound);

@@ -191,9 +191,13 @@ void ReleaseBoundRead(void *descriptor) noexcept {
 }
 
 shared_ptr<TableFunctionInfo> BoundReadBridgeInfo() {
-	static const PaimonReadBridgeV1 api {PAIMON_READ_BRIDGE_MAGIC, PAIMON_READ_BRIDGE_VERSION,
-	                                    sizeof(PaimonReadBridgeV1), AcceptsBoundRead, RetainBoundRead,
-	                                    DescribeBoundRead, ReleaseBoundRead};
+	static const PaimonReadBridgeV1 api {PAIMON_READ_BRIDGE_MAGIC,
+	                                     PAIMON_READ_BRIDGE_VERSION,
+	                                     sizeof(PaimonReadBridgeV1),
+	                                     AcceptsBoundRead,
+	                                     RetainBoundRead,
+	                                     DescribeBoundRead,
+	                                     ReleaseBoundRead};
 	static const auto info = make_shared_ptr<PaimonReadBridgeInfo>(api);
 	return info;
 }
