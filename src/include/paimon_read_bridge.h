@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-#define PAIMON_READ_BRIDGE_MAGIC UINT64_C(0x5041494d4f4e5244)
+#define PAIMON_READ_BRIDGE_MAGIC   UINT64_C(0x5041494d4f4e5244)
 #define PAIMON_READ_BRIDGE_VERSION 1
 
 enum PaimonReadStatus {
