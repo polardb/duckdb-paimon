@@ -354,9 +354,12 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 	// copy owns DuckDB buffers and does not rely on deferred native destruction.
 	RequireNoArrowOwner(output.data[0]);
 	Rows expected;
+	vector<bool> identities(5000, false);
 	for (idx_t row = 0; row < output.size(); row++) {
 		const auto id = output.GetValue(0, row).GetValue<int32_t>();
 		REQUIRE((id >= 0 && id < 5000));
+		REQUIRE_FALSE(identities[id]);
+		identities[id] = true;
 		for (idx_t col = 0; col < output.ColumnCount(); col++) {
 			const auto value = output.GetValue(col, row);
 			REQUIRE(value.type() == authored[id][col].type());
@@ -386,6 +389,15 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 			next();
 			total += output.size();
 			for (idx_t row = 0; row < output.size(); row++) {
+				const auto id = output.GetValue(0, row).GetValue<int32_t>();
+				REQUIRE((id >= 0 && id < 5000));
+				REQUIRE_FALSE(identities[id]);
+				identities[id] = true;
+				for (idx_t col = 0; col < output.ColumnCount(); col++) {
+					const auto value = output.GetValue(col, row);
+					REQUIRE(value.type() == authored[id][col].type());
+					REQUIRE(Value::NotDistinctFrom(value, authored[id][col]));
+				}
 				const auto partition = output.GetValue(output.ColumnCount() - 1, row).GetValue<int32_t>();
 				REQUIRE((partition == 0 || partition == 1));
 				partition_seen[partition] = true;
@@ -396,6 +408,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon scan outputs own values across reader b
 		}
 		REQUIRE(output.size() == 0);
 		REQUIRE(total == 5000);
+		REQUIRE(std::all_of(identities.begin(), identities.end(), [](bool seen) { return seen; }));
 		REQUIRE((partition_seen[0] && partition_seen[1]));
 	} else {
 		local.reset();
