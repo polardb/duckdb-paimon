@@ -269,6 +269,8 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained schema identity", "[pai
 	const map<string, string> expected_options {{"bucket", "-1"},
 	                                            {"file.format", "parquet"},
 	                                            {"branch", "main"},
+	                                            {"file-system", "local"},
+	                                            {"read.batch-size", std::to_string(STANDARD_VECTOR_SIZE)},
 	                                            {"scan.mode", "from-snapshot-full"},
 	                                            {"scan.snapshot-id", "1"}};
 	REQUIRE(options == expected_options);
