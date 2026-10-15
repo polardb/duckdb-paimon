@@ -16,10 +16,10 @@ test_debug_internal: test_snapshot_binding_debug
 test_reldebug_internal: test_snapshot_binding_reldebug
 
 test_snapshot_binding_release:
-	cmake --build build/release --config Release --target paimon_check_snapshot_binding
+	cmake --build build/release --config Release --target paimon_check_snapshot_binding paimon_check_bound_read_bridge
 
 test_snapshot_binding_debug:
-	cmake --build build/debug --config Debug --target paimon_check_snapshot_binding
+	cmake --build build/debug --config Debug --target paimon_check_snapshot_binding paimon_check_bound_read_bridge
 
 test_snapshot_binding_reldebug:
-	cmake --build build/reldebug --config RelWithDebInfo --target paimon_check_snapshot_binding
+	cmake --build build/reldebug --config RelWithDebInfo --target paimon_check_snapshot_binding paimon_check_bound_read_bridge
