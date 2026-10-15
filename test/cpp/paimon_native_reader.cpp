@@ -19,6 +19,10 @@
 #include "paimon/table/source/table_scan.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <future>
 #include <map>
 #include <memory>
@@ -79,8 +83,9 @@ struct NativeRead {
 	std::unique_ptr<paimon::TableRead> table;
 	std::unique_ptr<paimon::BatchReader, CloseReader> reader;
 
-	explicit NativeRead(std::shared_ptr<paimon::MemoryPool> pool) : pool(std::move(pool)) {
-		const std::string path = std::string(PAIMON_FIXTURE_DIR) + "/testdb.db/testtbl";
+	explicit NativeRead(std::shared_ptr<paimon::MemoryPool> pool,
+	                    const std::string &path = std::string(PAIMON_FIXTURE_DIR) + "/testdb.db/testtbl")
+	    : pool(std::move(pool)) {
 		const std::map<std::string, std::string> options {{"scan.mode", "from-snapshot-full"},
 		                                                  {"scan.snapshot-id", "3"},
 		                                                  {"read.batch-size", "2"},
@@ -121,6 +126,9 @@ struct NativeRead {
 		INFO(created_table.status().ToString());
 		REQUIRE(created_table.ok());
 		table = std::move(created_table).value();
+	}
+
+	void OpenReader() {
 		auto created_reader = table->CreateReader(plan->Splits());
 		INFO(created_reader.status().ToString());
 		REQUIRE(created_reader.ok());
@@ -137,6 +145,8 @@ Rows ReadRows(const RootBatch &root) {
 	REQUIRE(schema.release);
 	REQUIRE(std::string(schema.format) == "+s");
 	REQUIRE(array.offset == 0);
+	REQUIRE(array.length > 0);
+	REQUIRE(array.length <= 2);
 	REQUIRE(array.n_children == 3);
 	REQUIRE(schema.n_children == 3);
 	const std::vector<std::string> formats {"c", "u", "i"};
@@ -172,6 +182,7 @@ TEST_CASE("Paimon native roots survive subsequent reads and EOF", "[paimon][nati
 	auto pool = std::shared_ptr<paimon::MemoryPool>(paimon::GetMemoryPool());
 	{
 		NativeRead read(pool);
+		read.OpenReader();
 		std::vector<std::unique_ptr<RootBatch>> retained;
 		Rows actual;
 		while (true) {
@@ -225,6 +236,7 @@ TEST_CASE("Paimon native reader permits serialized worker handover", "[paimon][n
 	auto pool = std::shared_ptr<paimon::MemoryPool>(paimon::GetMemoryPool());
 	{
 		NativeRead read(pool);
+		read.OpenReader();
 		Rows actual;
 		size_t batches = 0;
 		const auto creator = std::this_thread::get_id();
@@ -259,6 +271,58 @@ TEST_CASE("Paimon EOF is not a zero-row Arrow root", "[paimon][native_reader]") 
 	RootBatch zero({std::make_unique<ArrowArray>(), std::make_unique<ArrowSchema>()});
 	REQUIRE(zero.batch.first->length == 0);
 	REQUIRE_FALSE(paimon::BatchReader::IsEofBatch(zero.batch));
+}
+
+struct FixtureCopy {
+	std::filesystem::path path;
+	FixtureCopy() {
+		static std::atomic<uint64_t> next_id {0};
+		const auto *root = std::getenv("PAIMON_TEST_ROOT");
+		const auto base = root ? std::filesystem::path(root) : std::filesystem::temp_directory_path();
+		const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+		path = base / ("native-reader-" + std::to_string(stamp) + "-" + std::to_string(next_id++));
+		REQUIRE(std::filesystem::create_directories(path));
+		std::filesystem::copy(std::string(PAIMON_FIXTURE_DIR) + "/testdb.db/testtbl", path,
+		                      std::filesystem::copy_options::recursive);
+	}
+	~FixtureCopy() {
+		std::error_code ignored;
+		std::filesystem::remove_all(path, ignored);
+	}
+};
+
+TEST_CASE("Paimon native missing data is an error, not EOF", "[paimon][native_reader]") {
+	FixtureCopy fixture;
+	auto pool = std::shared_ptr<paimon::MemoryPool>(paimon::GetMemoryPool());
+	{
+		NativeRead read(pool, fixture.path.string());
+		std::vector<std::filesystem::path> files;
+		for (const auto &entry : std::filesystem::recursive_directory_iterator(fixture.path)) {
+			if (entry.path().extension() == ".parquet") {
+				files.push_back(entry.path());
+			}
+		}
+		REQUIRE_FALSE(files.empty());
+		for (const auto &path : files) {
+			REQUIRE(std::filesystem::remove(path));
+		}
+		// The selected plan still names the removed files. A lazy reader may fail
+		// at creation or on its first read; neither may become successful EOF.
+		auto opened = read.table->CreateReader(read.plan->Splits());
+		paimon::Status error;
+		if (!opened.ok()) {
+			error = opened.status();
+		} else {
+			read.reader.reset(std::move(opened).value().release());
+			auto next = read.reader->NextBatch();
+			REQUIRE_FALSE(next.ok());
+			error = next.status();
+		}
+		INFO(error.ToString());
+		REQUIRE_FALSE(error.ok());
+		REQUIRE(error.ToString().find(".parquet") != std::string::npos);
+	}
+	REQUIRE(pool->CurrentUsage() == 0);
 }
 
 } // namespace
