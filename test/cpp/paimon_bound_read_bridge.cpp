@@ -18,10 +18,13 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "catch.hpp"
+#include "yyjson.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <type_traits>
 #if defined(__unix__) || defined(__APPLE__)
 #include <dlfcn.h>
@@ -34,6 +37,20 @@ static_assert(std::is_standard_layout<PaimonBoundReadViewV1>::value, "Views must
 
 static string Text(PaimonReadString value) {
 	return string(value.data, value.size);
+}
+
+static void CheckSchema(const PaimonBoundReadViewV1 &view, const string &path) {
+	using namespace duckdb_yyjson;
+	std::ifstream input(path);
+	REQUIRE(input.good());
+	string expected((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> actual(
+	    yyjson_read(view.schema_json.data, view.schema_json.size, 0), yyjson_doc_free);
+	std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> oracle(yyjson_read(expected.data(), expected.size(), 0),
+	                                                               yyjson_doc_free);
+	REQUIRE(actual);
+	REQUIRE(oracle);
+	REQUIRE(yyjson_equals(yyjson_doc_get_root(actual.get()), yyjson_doc_get_root(oracle.get())));
 }
 
 static void SQL(Connection &con, const string &query) {
@@ -225,6 +242,18 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained schema identity", "[pai
 	Retain(bound, old);
 	auto schema = Text(old.View().schema_json);
 	REQUIRE(old.View().schema_id == 0);
+	CheckSchema(old.View(), path + "/schema/schema-0");
+	map<string, string> options;
+	auto view = old.View();
+	for (uint64_t i = 0; i < view.option_count; i++) {
+		REQUIRE(options.emplace(Text(view.options[i].key), Text(view.options[i].value)).second);
+	}
+	const map<string, string> expected_options {{"bucket", "-1"},
+	                                            {"file.format", "parquet"},
+	                                            {"branch", "main"},
+	                                            {"scan.mode", "from-snapshot-full"},
+	                                            {"scan.snapshot-id", "1"}};
+	REQUIRE(options == expected_options);
 	bound.data.reset();
 	std::filesystem::rename(staged, published);
 	SQL(*reader, "DETACH pm");
@@ -233,6 +262,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained schema identity", "[pai
 	Descriptor fresh(api);
 	Retain(fresh_bound, fresh);
 	REQUIRE(fresh.View().schema_id == 1);
+	CheckSchema(fresh.View(), published);
 	REQUIRE(Text(fresh.View().schema_json) != schema);
 	REQUIRE(Text(old.View().schema_json) == schema);
 }

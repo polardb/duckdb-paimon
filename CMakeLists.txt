@@ -233,7 +233,7 @@ if(BUILD_UNITTESTS)
     test/cpp/paimon_read_bridge_c.c)
   target_include_directories(unittest_paimon_bridge PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch)
-  target_link_libraries(unittest_paimon_bridge duckdb ${CMAKE_DL_LIBS})
+  target_link_libraries(unittest_paimon_bridge duckdb duckdb_yyjson ${CMAKE_DL_LIBS})
   target_compile_definitions(unittest_paimon_bridge PRIVATE
     PAIMON_BRIDGE_BUILTIN=$<BOOL:${DUCKDB_EXTENSION_PAIMON_SHOULD_LINK}>
     PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
