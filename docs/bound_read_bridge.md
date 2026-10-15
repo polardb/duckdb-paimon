@@ -56,11 +56,14 @@ catalog, type or scan mode.
 ## Acceptance and Tests
 
 `make test_release`, `make test_debug` and `make test_reldebug` include
-`paimon_check_bound_read_bridge`. It builds a consumer linked only to DuckDB and
-LOADs the real Paimon dynamic extension. No Paimon or Arrow C++ library is linked
-directly into the consumer. On Linux/macOS the test also checks that the callback
-address belongs to the loaded extension, not a built-in provider. The public C
-header is compiled as C.
+`paimon_check_bound_read_bridge`. The default host has built-in Paimon, so this
+lane checks descriptor contracts, NOT cross-DSO qualification. The same tests in
+the separate `DONT_LINK` configuration below LOAD the real dynamic extension;
+that consumer links only DuckDB, without Paimon/Arrow C++ libraries or a built-in
+producer. On Linux/macOS the dynamic lane also checks that callback addresses
+belong to the loaded extension. A missing producer must fail. The public C header
+is compiled as C. Both lanes are required for bridge qualification; a passing
+built-in lane does not substitute for dynamic evidence.
 
 The focused target can be run from an existing build:
 

@@ -38,7 +38,7 @@ static string Text(PaimonReadString value) {
 
 static void SQL(Connection &con, const string &query) {
 	auto result = con.Query(query);
-	INFO(result->HasError() ? result->GetError() : "");
+	INFO((result->HasError() ? result->GetError() : ""));
 	REQUIRE_FALSE(result->HasError());
 }
 
@@ -72,11 +72,13 @@ struct BridgeFixture {
 	string warehouse;
 
 	BridgeFixture() {
-		config.options.allow_unsigned_extensions = true;
+		config.SetOptionByName("allow_unsigned_extensions", Value(true));
 		db = make_uniq<DuckDB>(nullptr, &config);
 		reader = make_uniq<Connection>(*db);
 		writer = make_uniq<Connection>(*db);
+#if !PAIMON_BRIDGE_BUILTIN
 		SQL(*reader, "LOAD " + Value(PAIMON_BRIDGE_EXTENSION_PATH).ToSQLString());
+#endif
 		static std::atomic<uint64_t> next_id {0};
 		auto *root = std::getenv("PAIMON_TEST_ROOT");
 		auto base = root ? std::filesystem::path(root) : std::filesystem::temp_directory_path();
@@ -134,7 +136,7 @@ struct BridgeFixture {
 		REQUIRE(info->api.magic == PAIMON_READ_BRIDGE_MAGIC);
 		REQUIRE(info->api.version == PAIMON_READ_BRIDGE_VERSION);
 		REQUIRE(info->api.struct_size == sizeof(PaimonReadBridgeV1));
-#if defined(__unix__) || defined(__APPLE__)
+#if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
 		Dl_info origin {};
 		REQUIRE(dladdr(reinterpret_cast<const void *>(info->api.retain), &origin) != 0);
 		REQUIRE(origin.dli_fname);
@@ -185,6 +187,19 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained identity outlives bindi
 	}
 	REQUIRE(pinned_option);
 }
+
+#if !PAIMON_BRIDGE_BUILTIN
+TEST_CASE("Paimon bridge: missing dynamic producer cannot become success", "[paimon][bound_read_bridge_dynamic]") {
+	DBConfig config;
+	config.SetOptionByName("allow_unsigned_extensions", Value(true));
+	DuckDB db(nullptr, &config);
+	Connection con(db);
+	auto result = con.Query("LOAD " + Value(string(PAIMON_BRIDGE_EXTENSION_PATH) + ".missing").ToSQLString());
+	REQUIRE(result->HasError());
+	result = con.Query("SELECT * FROM paimon_scan('missing')");
+	REQUIRE(result->HasError());
+}
+#endif
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: empty is not latest", "[paimon][bound_read_bridge]") {
 	auto bound = Bind(GENERATE(0, 1, 2));
