@@ -20,10 +20,12 @@
 #include <type_traits>
 
 namespace {
-thread_local bool inject_failure = false;
+enum class Fault { NONE, BEFORE_CONVERSION, PARTIAL_CONVERSION, AFTER_CONVERSION };
+thread_local Fault injected_fault = Fault::NONE;
 thread_local int acquired = 0;
 thread_local int released = 0;
 thread_local int deleted = 0;
+thread_local size_t converted_columns = 0;
 thread_local const void *exported_shell = nullptr;
 thread_local void (*producer_release)(ArrowSchema *) = nullptr;
 constexpr const char *failure = "injected Paimon schema conversion failure";
@@ -35,12 +37,23 @@ void TrackRelease(ArrowSchema *schema) {
 }
 
 struct ScopedFailure {
-	ScopedFailure() {
-		inject_failure = true;
+	explicit ScopedFailure(Fault fault) {
+		injected_fault = fault;
 	}
 	~ScopedFailure() {
-		inject_failure = false;
+		injected_fault = Fault::NONE;
 	}
+};
+
+struct ScopedFormat {
+	explicit ScopedFormat(ArrowSchema &schema) : schema(schema), format(schema.format) {
+		schema.format = "invalid_schema_release_probe";
+	}
+	~ScopedFormat() {
+		schema.format = format;
+	}
+	ArrowSchema &schema;
+	const char *format;
 };
 } // namespace
 
@@ -86,36 +99,67 @@ extern "C" void WrappedPopulate(duckdb::ClientContext &context, duckdb::ArrowTab
 	exported_shell = &schema;
 	producer_release = schema.release;
 	const_cast<ArrowSchema &>(schema).release = TrackRelease;
-	if (inject_failure) {
+	if (injected_fault == Fault::BEFORE_CONVERSION) {
 		throw duckdb::InvalidInputException(failure);
 	}
+	if (injected_fault == Fault::PARTIAL_CONVERSION) {
+		if (schema.n_children < 2) {
+			throw duckdb::InvalidInputException("fault probe requires two schema children");
+		}
+		ScopedFormat invalid(*schema.children[1]);
+		try {
+			RealPopulate(context, table, schema);
+		} catch (...) {
+			converted_columns = table.GetTypes().size();
+			throw;
+		}
+		throw duckdb::InvalidInputException("fault probe did not trigger converter failure");
+	}
 	RealPopulate(context, table, schema);
+	if (injected_fault == Fault::AFTER_CONVERSION) {
+		converted_columns = table.GetTypes().size();
+		throw duckdb::InvalidInputException(failure);
+	}
 }
 
 TEST_CASE("Paimon binding releases exported schema on success and conversion failure", "[paimon][schema_release]") {
+	const auto catalog = GENERATE(false, true);
+	const auto fault = GENERATE(Fault::BEFORE_CONVERSION, Fault::PARTIAL_CONVERSION, Fault::AFTER_CONVERSION);
+	CAPTURE(catalog, static_cast<int>(fault));
+	acquired = released = deleted = 0;
+	converted_columns = 0;
 	duckdb::DBConfig config;
 	config.options.load_extensions = false;
 	duckdb::DuckDB db(nullptr, &config);
 	db.LoadStaticExtension<duckdb::PaimonExtension>();
 	duckdb::Connection con(db);
 	const auto source = duckdb::Value(std::string(PAIMON_FIXTURE_DIR) + "/testdb.db/testtbl").ToSQLString();
+	const auto attach = "ATTACH " + duckdb::Value(PAIMON_FIXTURE_DIR).ToSQLString() + " AS pm (TYPE paimon)";
+	if (catalog) {
+		REQUIRE_FALSE(con.Query(attach)->HasError());
+	}
+	const auto from = catalog ? std::string("pm.testdb.testtbl") : "paimon_scan(" + source + ")";
 
-	auto baseline = con.Query("SELECT count(*) FROM paimon_scan(" + source + ")");
+	auto baseline = con.Query("SELECT count(*) FROM " + from);
 	REQUIRE_FALSE(baseline->HasError());
 	auto rows = baseline->Fetch();
 	REQUIRE(rows);
 	REQUIRE(rows->size() == 1);
 	REQUIRE(rows->GetValue(0, 0).GetValue<int64_t>() == 9);
-	REQUIRE(acquired == 1);
-	REQUIRE(released == 1);
-	REQUIRE(deleted == 1);
+	REQUIRE(acquired == (catalog ? 2 : 1));
+	REQUIRE(released == acquired);
+	REQUIRE(deleted == acquired);
+	if (catalog) {
+		REQUIRE_FALSE(con.Query("DETACH pm")->HasError());
+		REQUIRE_FALSE(con.Query(attach)->HasError());
+	}
 
 	acquired = released = deleted = 0;
 	std::string observed;
 	{
-		ScopedFailure fault;
+		ScopedFailure injection(fault);
 		try {
-			auto result = con.Query("SELECT f1 FROM paimon_scan(" + source + ")");
+			auto result = con.Query("SELECT f1 FROM " + from);
 			if (!result->HasError()) {
 				// Fetch also drives a lazy QueryResult on the maintained v2 host.
 				(void)result->Fetch();
@@ -128,7 +172,13 @@ TEST_CASE("Paimon binding releases exported schema on success and conversion fai
 		}
 	}
 	INFO(observed);
-	REQUIRE(observed.find(failure) != std::string::npos);
+	const auto expected = fault == Fault::PARTIAL_CONVERSION ? "Unsupported Internal Arrow Type" : failure;
+	REQUIRE(observed.find(expected) != std::string::npos);
+	if (fault == Fault::PARTIAL_CONVERSION) {
+		REQUIRE(converted_columns == 1);
+	} else if (fault == Fault::AFTER_CONVERSION) {
+		REQUIRE(converted_columns >= 2);
+	}
 	REQUIRE(acquired == 1);
 	REQUIRE(released == 1);
 	REQUIRE(deleted == 1);

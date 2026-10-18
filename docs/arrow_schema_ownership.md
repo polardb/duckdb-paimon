@@ -18,6 +18,13 @@ Observation state is thread-local: the exported root is released and its shell
 deleted synchronously in the binder frame; unrelated worker deletes are not
 observed.
 
+The probe covers both the direct scan binder and catalog table lookup. It tests
+an injected error before conversion, a real converter error on the second child
+after one column has been initialized, and an injected error after conversion.
+The temporary invalid format is restored before the producer releases its schema.
+Catalog lookup is repeated after detach/attach so the failure cannot use a cached
+table entry.
+
 After building, the focused test is:
 
 ```sh
