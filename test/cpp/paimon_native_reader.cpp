@@ -276,21 +276,61 @@ TEST_CASE("Paimon EOF is not a zero-row Arrow root", "[paimon][native_reader]") 
 
 struct FixtureCopy {
 	std::filesystem::path path;
-	FixtureCopy() {
+	static std::filesystem::path NewPath() {
 		static std::atomic<uint64_t> next_id {0};
 		const auto *root = std::getenv("PAIMON_TEST_ROOT");
 		const auto base = root ? std::filesystem::path(root) : std::filesystem::temp_directory_path();
 		const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-		path = base / ("native-reader-" + std::to_string(stamp) + "-" + std::to_string(next_id++));
-		REQUIRE(std::filesystem::create_directories(path));
-		std::filesystem::copy(std::string(PAIMON_FIXTURE_DIR) + "/testdb.db/testtbl", path,
-		                      std::filesystem::copy_options::recursive);
+		return base / ("native-reader-" + std::to_string(stamp) + "-" + std::to_string(next_id++));
 	}
+	FixtureCopy() : FixtureCopy(NewPath(), std::string(PAIMON_FIXTURE_DIR) + "/testdb.db/testtbl") {
+	}
+	FixtureCopy(std::filesystem::path destination, const std::filesystem::path &source) : path(std::move(destination)) {
+		if (!std::filesystem::create_directories(path)) {
+			throw std::filesystem::filesystem_error("Fixture destination already exists", path,
+			                                        std::make_error_code(std::errc::file_exists));
+		}
+		try {
+			std::filesystem::copy(source, path, std::filesystem::copy_options::recursive);
+		} catch (...) {
+			std::error_code ignored;
+			std::filesystem::remove_all(path, ignored);
+			throw;
+		}
+	}
+	FixtureCopy(const FixtureCopy &) = delete;
+	FixtureCopy &operator=(const FixtureCopy &) = delete;
 	~FixtureCopy() {
 		std::error_code ignored;
 		std::filesystem::remove_all(path, ignored);
 	}
 };
+
+TEST_CASE("Paimon fixture copy cleans up failed construction", "[paimon][native_reader]") {
+	FixtureCopy staging;
+	const auto source = staging.path / "source";
+	const auto destination = staging.path / "destination";
+	SECTION("Missing source removes the owned destination") {
+		REQUIRE_THROWS_AS(FixtureCopy(destination, source), std::filesystem::filesystem_error);
+		REQUIRE_FALSE(std::filesystem::exists(destination));
+	}
+	SECTION("Partial copy removes the owned destination") {
+		REQUIRE(std::filesystem::create_directories(source / "partial"));
+		std::filesystem::create_symlink("missing", source / "partial" / "dangling");
+		// Establish that this real copy error occurs after creating partial output.
+		const auto control = staging.path / "control";
+		REQUIRE_THROWS_AS(std::filesystem::copy(source, control, std::filesystem::copy_options::recursive),
+		                  std::filesystem::filesystem_error);
+		REQUIRE(std::filesystem::is_directory(control / "partial"));
+		REQUIRE_THROWS_AS(FixtureCopy(destination, source), std::filesystem::filesystem_error);
+		REQUIRE_FALSE(std::filesystem::exists(destination));
+	}
+	SECTION("Preexisting destination is not owned") {
+		REQUIRE(std::filesystem::create_directories(destination / "keep"));
+		REQUIRE_THROWS_AS(FixtureCopy(destination, source), std::filesystem::filesystem_error);
+		REQUIRE(std::filesystem::is_directory(destination / "keep"));
+	}
+}
 
 TEST_CASE("Paimon native missing data is an error, not EOF", "[paimon][native_reader]") {
 	FixtureCopy fixture;
