@@ -11,6 +11,7 @@
  */
 
 #include "paimon_extension.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/config.hpp"
 #include "catch.hpp"
@@ -156,6 +157,7 @@ TEST_CASE("Paimon binding releases exported schema on success and conversion fai
 
 	acquired = released = deleted = 0;
 	std::string observed;
+	auto observed_type = duckdb::ExceptionType::INVALID;
 	{
 		ScopedFailure injection(fault);
 		try {
@@ -166,12 +168,17 @@ TEST_CASE("Paimon binding releases exported schema on success and conversion fai
 			}
 			if (result->HasError()) {
 				observed = result->GetError();
+				observed_type = result->GetErrorType();
 			}
 		} catch (const std::exception &error) {
 			observed = error.what();
+			observed_type = duckdb::ErrorData(error).Type();
 		}
 	}
 	INFO(observed);
+	const auto expected_type = fault == Fault::PARTIAL_CONVERSION ? duckdb::ExceptionType::NOT_IMPLEMENTED
+	                                                              : duckdb::ExceptionType::INVALID_INPUT;
+	REQUIRE(observed_type == expected_type);
 	const auto expected = fault == Fault::PARTIAL_CONVERSION ? "Unsupported Internal Arrow Type" : failure;
 	REQUIRE(observed.find(expected) != std::string::npos);
 	if (fault == Fault::PARTIAL_CONVERSION) {
