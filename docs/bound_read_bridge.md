@@ -80,7 +80,8 @@ built-in lane does not substitute for dynamic evidence.
 
 The `Dynamic Bound Read Bridge` workflow runs the focused DONT_LINK target with
 optimized Clang on Linux and macOS for pushes and pull requests. It retains test
-reports, build configuration and failing warehouses. Cloud backends are disabled
+reports, build configuration and failing warehouses from the same runner root;
+successful warehouses are removed. Cloud backends are disabled
 in this descriptor lane; the normal distribution workflow covers their build.
 No-tests and failed-child controls exercise the same CMake runner's failure path.
 

@@ -36,10 +36,9 @@ jobs:
       - name: Build and test real hidden producer
         shell: bash
         run: cmake --build build/bridge --target paimon_check_bound_read_bridge 2>&1 | tee bridge-build.log
-      - name: Record bridge results and binary provenance
+      - name: Record binary provenance
         shell: bash
         run: |
-          build/bridge/test/unittest_paimon_bridge '[paimon]' --warn NoTests --reporter junit --out build/bridge/bridge.xml
           git rev-parse HEAD
           git submodule status
           clang++ --version
@@ -58,7 +57,6 @@ jobs:
         with:
           name: bridge-dynamic-${{ matrix.os }}-${{ github.sha }}
           path: |
-            build/bridge/bridge.xml
             build/bridge/CMakeCache.txt
             build/bridge/compile_commands.json
             build/bridge/extension/paimon/bridge-test-work/
