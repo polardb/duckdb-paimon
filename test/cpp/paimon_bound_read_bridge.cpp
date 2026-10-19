@@ -231,7 +231,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: discovery rejects foreign defini
 	SECTION("foreign scan with genuine wrapper") {
 		reader->BeginTransaction();
 		auto &foreign = Catalog::GetSystemCatalog(*reader->context)
-		                    .GetEntry<TableFunctionCatalogEntry>(*reader->context, DEFAULT_SCHEMA, "range");
+		                    .GetEntry<TableFunctionCatalogEntry>(*reader->context, DEFAULT_SCHEMA, "repeat");
 		candidate = foreign.functions.GetFunctionByOffset(0);
 		reader->Commit();
 		REQUIRE(candidate.function);
