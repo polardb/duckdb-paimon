@@ -228,6 +228,16 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: discovery rejects foreign defini
 	SECTION("wrong local callback") {
 		candidate.init_local = nullptr;
 	}
+	SECTION("foreign scan with genuine wrapper") {
+		reader->BeginTransaction();
+		auto &foreign = Catalog::GetSystemCatalog(*reader->context)
+		                    .GetEntry<TableFunctionCatalogEntry>(*reader->context, DEFAULT_SCHEMA, "range");
+		candidate = foreign.functions.GetFunctionByOffset(0);
+		reader->Commit();
+		REQUIRE(candidate.function);
+		REQUIRE(candidate.function != trusted.function);
+		candidate.function_info = trusted.function_info;
+	}
 	REQUIRE_FALSE(TryGetPaimonReadBridge(candidate, trusted));
 	REQUIRE_FALSE(TryGetPaimonReadBridge(bound.function, TableFunction()));
 }
