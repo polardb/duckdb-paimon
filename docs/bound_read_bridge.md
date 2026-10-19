@@ -84,6 +84,10 @@ reports, build configuration and failing warehouses from the same runner root;
 successful warehouses are removed. Cloud backends are disabled
 in this descriptor lane; the normal distribution workflow covers their build.
 No-tests and failed-child controls exercise the same CMake runner's failure path.
+The common runner prints retained JUnit diagnostics on failure, including in the
+normal distribution workflow. Its report-presence check is not XML validation;
+test success and no-tests rejection rely on the pinned DuckDB Catch runner's
+exit status. Qualification separately checks structured case/section results.
 
 The focused target can be run from an existing build:
 
