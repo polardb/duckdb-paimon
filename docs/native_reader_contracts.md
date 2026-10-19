@@ -5,6 +5,10 @@ the checked-in local append-only Parquet fixture at snapshot 3 and independently
 specified rows, including variable-width strings. They do not enable a Sirius
 source or execute GPU operators.
 
+The tests call `TableRead`/`BatchReader` directly. They do not qualify DuckDB's
+registered `paimon_scan` entry point or its default pool, executor and read-ahead
+configuration.
+
 Run through the normal entry point:
 
 ```sh
@@ -36,10 +40,22 @@ they do not claim roots may outlive readers. Upstream paimon-cpp #260 changes
 that contract at `885b2c00e7438d87c8e80512f0743f2bb8e3ce93`, which is not the
 current gitlink. No dependency upgrade or replacement lifetime API is included.
 
+Re-reading retained values, checking release callbacks and observing zero final
+pool usage do not prove that every buffer stayed allocated: freed storage may
+still contain the expected bytes. Even a pool-usage decrease at root release
+would only be aggregate accounting. Lifetime evidence needs a sanitizer run and
+a deliberate invalid-lifetime control that demonstrates detection, with the
+instrumented components stated explicitly. Ordinary test success alone must not
+be described as that evidence.
+
 Tests supply an inline executor and explicitly disable prefetch, multi-thread
 row conversion, late materialization, read-ahead cache, Parquet pre-buffering
 and Parquet decode threads. This selected configuration does not establish a
 general no-background-work guarantee for other readers or options.
+
+The layout checks describe this pinned fixture: computed zero null counts,
+32-bit-offset UTF-8 (`u`) and the specified integer types. Other Arrow layouts
+need matching decoders and tests before those checks can be relaxed.
 
 Primary-key merge, other formats/types, branch/schema evolution, hard planning
 limits, native allocation refusal, cancellation/draining, cross-extension bridge
