@@ -22,6 +22,17 @@ check the API magic/version/size and required callbacks, and pass a live
 bind data or calls paimon-cpp directly. This PR does not register a Sirius
 connector or implement its trusted-reference lookup.
 
+`TryGetPaimonReadBridge(candidate, trusted)` compares the scan/bind/init callbacks
+and singleton wrapper identity before accessing the wrapper, then validates the
+API prefix and every required callback. `trusted` must already be an unmodified
+definition from an authenticated provider, with its module kept loaded. Passing
+an arbitrary catalog entry as both arguments does not establish trust. Hidden
+RTTI can differ across modules, so discovery does not use `dynamic_cast`.
+The fixture owns LOAD and captures the unmodified registration; on Linux/macOS
+it authenticates scan/bind and all bridge callback addresses with `dladdr`
+against the exact loaded file. A production connector still needs its own
+trusted-reference acquisition.
+
 ## Descriptor Contract
 
 The C-compatible header `src/include/paimon_read_bridge.h` defines version 1:
@@ -39,6 +50,8 @@ The C-compatible header `src/include/paimon_read_bridge.h` defines version 1:
   database/table, resolved location/branch, schema ID, full native schema JSON
   and effective native options. The schema includes stable field IDs and types.
   `has_snapshot == 0` means the table was empty at binding, never "latest".
+  Options alone cannot reconstruct a read: consumers must handle empty identity
+  before any native planning, even if options have no `scan.snapshot-id`.
   An undersized output buffer is rejected without writing it. A valid-sized
   output is cleared on NULL-descriptor failure.
 - `release`: releases one live descriptor using the producer's allocator; NULL
@@ -64,6 +77,12 @@ producer. On Linux/macOS the dynamic lane also checks that callback addresses
 belong to the loaded extension. A missing producer must fail. The public C header
 is compiled as C. Both lanes are required for bridge qualification; a passing
 built-in lane does not substitute for dynamic evidence.
+
+The `Dynamic Bound Read Bridge` workflow runs the focused DONT_LINK target with
+optimized Clang on Linux and macOS for pushes and pull requests. It retains test
+reports, build configuration and failing warehouses. Cloud backends are disabled
+in this descriptor lane; the normal distribution workflow covers their build.
+No-tests and failed-child controls exercise the same CMake runner's failure path.
 
 The focused target can be run from an existing build:
 

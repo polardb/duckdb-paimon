@@ -20,8 +20,11 @@ endforeach()
 file(MAKE_DIRECTORY "${TEST_ROOT}")
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef test_id)
 set(warehouse "${TEST_ROOT}/warehouse-${test_id}")
+if(NOT DEFINED TEST_FILTER)
+  set(TEST_FILTER "[paimon]")
+endif()
 execute_process(COMMAND "${CMAKE_COMMAND}" -E env "PAIMON_TEST_ROOT=${warehouse}"
-  "${TEST_BINARY}" "[paimon]" --warn NoTests --reporter compact
+  "${TEST_BINARY}" "${TEST_FILTER}" --warn NoTests --reporter compact
   RESULT_VARIABLE result TIMEOUT 180)
 if(NOT "${result}" STREQUAL "0")
   message(FATAL_ERROR "Snapshot binding test failed (${result}); inputs preserved at ${warehouse}")

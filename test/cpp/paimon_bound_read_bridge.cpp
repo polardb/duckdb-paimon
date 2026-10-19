@@ -105,6 +105,7 @@ struct BridgeFixture {
 	unique_ptr<Connection> reader;
 	unique_ptr<Connection> writer;
 	string warehouse;
+	TableFunction trusted;
 
 	BridgeFixture() {
 		config.SetOptionByName("allow_unsigned_extensions", Value(true));
@@ -113,6 +114,15 @@ struct BridgeFixture {
 		writer = make_uniq<Connection>(*db);
 #if !PAIMON_BRIDGE_BUILTIN
 		SQL(*reader, "LOAD " + Value(PAIMON_BRIDGE_EXTENSION_PATH).ToSQLString());
+#endif
+		reader->BeginTransaction();
+		auto &entry = Catalog::GetSystemCatalog(*reader->context)
+		                  .GetEntry<TableFunctionCatalogEntry>(*reader->context, DEFAULT_SCHEMA, "paimon_scan");
+		trusted = entry.functions.GetFunctionByOffset(0);
+		reader->Commit();
+#if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
+		CheckOrigin(reinterpret_cast<const void *>(trusted.function));
+		CheckOrigin(reinterpret_cast<const void *>(trusted.bind));
 #endif
 		static std::atomic<uint64_t> next_id {0};
 		auto *root = std::getenv("PAIMON_TEST_ROOT");
@@ -163,21 +173,26 @@ struct BridgeFixture {
 		}
 	}
 
-	const PaimonReadBridgeV1 &API(const BridgeBinding &bound) {
-		// Fixture owns LOAD and the unmodified catalog. Production consumers must
-		// establish provider/callback identity before interpreting function_info.
-		auto *info = dynamic_cast<const PaimonReadBridgeInfo *>(bound.function.function_info.get());
-		REQUIRE(info);
-		REQUIRE(info->api.magic == PAIMON_READ_BRIDGE_MAGIC);
-		REQUIRE(info->api.version == PAIMON_READ_BRIDGE_VERSION);
-		REQUIRE(info->api.struct_size == sizeof(PaimonReadBridgeV1));
 #if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
+	static void CheckOrigin(const void *callback) {
 		Dl_info origin {};
-		REQUIRE(dladdr(reinterpret_cast<const void *>(info->api.retain), &origin) != 0);
+		REQUIRE(dladdr(callback, &origin) != 0);
 		REQUIRE(origin.dli_fname);
 		REQUIRE(std::filesystem::equivalent(origin.dli_fname, PAIMON_BRIDGE_EXTENSION_PATH));
+	}
 #endif
-		return info->api;
+
+	const PaimonReadBridgeV1 &API(const BridgeBinding &bound) {
+		// Fixture controls LOAD and captures the definition before any catalog edits.
+		auto *api = TryGetPaimonReadBridge(bound.function, trusted);
+		REQUIRE(api);
+#if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
+		CheckOrigin(reinterpret_cast<const void *>(api->accepts_bind));
+		CheckOrigin(reinterpret_cast<const void *>(api->retain));
+		CheckOrigin(reinterpret_cast<const void *>(api->describe));
+		CheckOrigin(reinterpret_cast<const void *>(api->release));
+#endif
+		return *api;
 	}
 
 	void Retain(const BridgeBinding &bound, Descriptor &descriptor) {
@@ -189,6 +204,63 @@ struct BridgeFixture {
 		REQUIRE(descriptor.handle);
 	}
 };
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: discovery rejects foreign definitions before wrapper access",
+                 "[paimon][bound_read_bridge]") {
+	auto bound = Bind();
+	REQUIRE(TryGetPaimonReadBridge(bound.function, trusted));
+	auto candidate = bound.function;
+	SECTION("foreign object with matching callbacks") {
+		candidate.function_info = make_shared_ptr<TableFunctionInfo>();
+	}
+	SECTION("missing wrapper") {
+		candidate.function_info.reset();
+	}
+	SECTION("wrong scan callback") {
+		candidate.function = nullptr;
+	}
+	SECTION("wrong bind callback") {
+		candidate.bind = nullptr;
+	}
+	SECTION("wrong global callback") {
+		candidate.init_global = nullptr;
+	}
+	SECTION("wrong local callback") {
+		candidate.init_local = nullptr;
+	}
+	REQUIRE_FALSE(TryGetPaimonReadBridge(candidate, trusted));
+	REQUIRE_FALSE(TryGetPaimonReadBridge(bound.function, TableFunction()));
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: discovery validates authenticated API", "[paimon][bound_read_bridge]") {
+	auto bound = Bind();
+	auto api = API(bound);
+	SECTION("wrong magic") {
+		api.magic++;
+	}
+	SECTION("wrong version") {
+		api.version++;
+	}
+	SECTION("wrong size") {
+		api.struct_size--;
+	}
+	SECTION("missing accepts_bind") {
+		api.accepts_bind = nullptr;
+	}
+	SECTION("missing retain") {
+		api.retain = nullptr;
+	}
+	SECTION("missing describe") {
+		api.describe = nullptr;
+	}
+	SECTION("missing release") {
+		api.release = nullptr;
+	}
+	// This locally constructed definition is known to have the wrapper type.
+	auto definition = trusted;
+	definition.function_info = make_shared_ptr<PaimonReadBridgeInfo>(api);
+	REQUIRE_FALSE(TryGetPaimonReadBridge(definition, definition));
+}
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained identity outlives binding", "[paimon][bound_read_bridge]") {
 	auto entry = GENERATE(0, 1, 2);
