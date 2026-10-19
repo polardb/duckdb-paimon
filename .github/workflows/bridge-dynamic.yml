@@ -13,29 +13,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            cc: clang-18
-            cxx: clang++-18
-          - os: macos-15
-            cc: /usr/bin/clang
-            cxx: /usr/bin/clang++
+        os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
-      CC: ${{ matrix.cc }}
-      CXX: ${{ matrix.cxx }}
+      CC: clang
+      CXX: clang++
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install compatible build tools
-        shell: bash
-        run: python -m pip install --disable-pip-version-check cmake==3.31.6 ninja==1.11.1.1
       - name: Record selected toolchain
         shell: bash
         run: |
@@ -49,7 +37,6 @@ jobs:
         run: |
           cmake -S duckdb -B build/bridge -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
             -DDUCKDB_EXTENSION_CONFIGS="$PWD/test/extension_config_bridge.cmake" \
             -DPAIMON_ENABLE_OSS=OFF -DPAIMON_ENABLE_S3=OFF -DPAIMON_ENABLE_REST=OFF \
             -DENABLE_EXTENSION_AUTOINSTALL=OFF -DENABLE_EXTENSION_AUTOLOADING=OFF \
