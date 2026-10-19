@@ -13,22 +13,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        include:
+          - os: ubuntu-24.04
+            cc: clang-18
+            cxx: clang++-18
+          - os: macos-15
+            cc: /usr/bin/clang
+            cxx: /usr/bin/clang++
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
-      CC: clang
-      CXX: clang++
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install compatible build tools
+        shell: bash
+        run: python -m pip install --disable-pip-version-check cmake==3.31.6 ninja==1.11.1.1
+      - name: Record selected toolchain
+        shell: bash
+        run: |
+          command -v cmake ninja "$CC" "$CXX" | tee bridge-toolchain.log
+          cmake --version | tee -a bridge-toolchain.log
+          ninja --version | tee -a bridge-toolchain.log
+          "$CC" --version | tee -a bridge-toolchain.log
+          "$CXX" --version | tee -a bridge-toolchain.log
       - name: Configure isolated DONT_LINK host
         shell: bash
         run: |
           cmake -S duckdb -B build/bridge -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
             -DDUCKDB_EXTENSION_CONFIGS="$PWD/test/extension_config_bridge.cmake" \
             -DPAIMON_ENABLE_OSS=OFF -DPAIMON_ENABLE_S3=OFF -DPAIMON_ENABLE_REST=OFF \
             -DENABLE_EXTENSION_AUTOINSTALL=OFF -DENABLE_EXTENSION_AUTOLOADING=OFF \
@@ -41,7 +62,7 @@ jobs:
         run: |
           git rev-parse HEAD
           git submodule status
-          clang++ --version
+          "$CXX" --version
           cmake -E sha256sum build/bridge/test/unittest_paimon_bridge build/bridge/src/libduckdb.* build/bridge/extension/paimon/paimon.duckdb_extension
       - name: Reject no tests and failed child processes
         shell: bash
@@ -60,7 +81,9 @@ jobs:
             build/bridge/CMakeCache.txt
             build/bridge/compile_commands.json
             build/bridge/extension/paimon/bridge-test-work/
+            build/bridge/extension/paimon/paimon-cpp-build/CMakeCache.txt
             build/bridge/negative-*/
+            bridge-toolchain.log
             bridge-configure.log
             bridge-build.log
           if-no-files-found: warn
