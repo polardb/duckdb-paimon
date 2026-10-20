@@ -15,3 +15,5 @@
 _Static_assert(offsetof(struct PaimonReadBridgeV1, magic) == 0, "Invalid ABI prefix");
 _Static_assert(offsetof(struct PaimonReadBridgeV1, version) == 8, "Invalid ABI prefix");
 _Static_assert(offsetof(struct PaimonReadBridgeV1, struct_size) == 12, "Invalid ABI prefix");
+
+_Static_assert(offsetof(struct PaimonReadBridgeV2, descriptor) == 0, "Invalid native ABI prefix");

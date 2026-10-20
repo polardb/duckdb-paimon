@@ -37,12 +37,27 @@ inline const PaimonReadBridgeV1 *TryGetPaimonReadBridge(const BaseTableFunction 
 		return nullptr;
 	}
 	auto &api = static_cast<const PaimonReadBridgeInfo &>(*candidate.function_info).api;
-	if (api.magic != PAIMON_READ_BRIDGE_MAGIC || api.version != PAIMON_READ_BRIDGE_VERSION ||
-	    api.struct_size != sizeof(PaimonReadBridgeV1) || !api.accepts_bind || !api.retain || !api.describe ||
-	    !api.release) {
+	if (api.magic != PAIMON_READ_BRIDGE_MAGIC ||
+	    !((api.version == PAIMON_READ_BRIDGE_VERSION && api.struct_size == sizeof(PaimonReadBridgeV1)) ||
+	      (api.version == PAIMON_READ_BRIDGE_NATIVE_VERSION && api.struct_size == sizeof(PaimonReadBridgeV2))) ||
+	    !api.accepts_bind || !api.retain || !api.describe || !api.release) {
 		return nullptr;
 	}
 	return &api;
+}
+
+inline const PaimonReadBridgeV2 *TryGetPaimonNativeReadBridge(const TableFunction &candidate,
+                                                              const TableFunction &trusted) {
+	auto *prefix = TryGetPaimonReadBridge(candidate, trusted);
+	if (!prefix || prefix->version != PAIMON_READ_BRIDGE_NATIVE_VERSION) {
+		return nullptr;
+	}
+	auto *api = reinterpret_cast<const PaimonReadBridgeV2 *>(prefix);
+	if (!api->create_plan || !api->release_plan || !api->get_split || !api->release_split || !api->open_reader ||
+	    !api->release_reader || !api->next_batch || !api->release_batch) {
+		return nullptr;
+	}
+	return api;
 }
 
 } // namespace duckdb

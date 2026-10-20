@@ -50,11 +50,15 @@
 
 #include <string>
 #include <new>
+#include <mutex>
+#include "paimon/executor.h"
+#include "paimon/memory/memory_pool.h"
 
 namespace duckdb {
 
 // Execution states share only this immutable description, never a consumed reader.
 struct PaimonBoundRead {
+	bool native_read_supported = false;
 	string table_data_path;
 	string branch;
 	string table_schema_json;
@@ -190,15 +194,311 @@ void ReleaseBoundRead(void *descriptor) noexcept {
 	delete static_cast<RetainedPaimonRead *>(descriptor);
 }
 
+// All accepted executor work runs to completion before Add returns. There is
+// no queue to drain on exceptional or cancellation returns and nested Add is safe.
+class InlineReadExecutor final : public paimon::Executor {
+public:
+	void Add(std::function<void()> task) override {
+		task();
+	}
+	void ShutdownNow() override {
+	}
+	uint32_t GetThreadNum() const override {
+		return 1;
+	}
+};
+
+struct NativePlan {
+	explicit NativePlan(const PaimonBoundRead &read_p)
+	    : read(read_p), pool(paimon::GetMemoryPool()), executor(std::make_shared<InlineReadExecutor>()) {
+	}
+	PaimonBoundRead read;
+	std::shared_ptr<paimon::MemoryPool> pool;
+	std::shared_ptr<paimon::Executor> executor;
+	std::shared_ptr<paimon::Plan> plan;
+};
+using NativePlanHandle = std::shared_ptr<NativePlan>;
+
+struct NativeSplit {
+	NativePlanHandle plan;
+	uint64_t index;
+};
+
+struct NativeReader {
+	explicit NativeReader(const NativeSplit &split_p) : split(split_p) {
+	}
+	NativeSplit split;
+	std::unique_ptr<paimon::TableRead> table_read;
+	std::unique_ptr<paimon::BatchReader> reader;
+	std::mutex mutex;
+	bool batch_outstanding = false;
+	int32_t terminal_status = PAIMON_READ_OK;
+};
+using NativeReaderHandle = std::shared_ptr<NativeReader>;
+
+// Native unique_ptr shells do not release Arrow contents. Always release both
+// complete roots before their shells and before any reader/pool owner dies.
+struct NativeRoots {
+	paimon::BatchReader::ReadBatch roots;
+	~NativeRoots() {
+		if (roots.first && roots.first->release) {
+			roots.first->release(roots.first.get());
+		}
+		if (roots.second && roots.second->release) {
+			roots.second->release(roots.second.get());
+		}
+	}
+};
+struct NativeBatch {
+	NativeReaderHandle owner;
+	NativeRoots data;
+};
+
+bool ReadCancelled(const PaimonReadCancellationV1 *cancel) {
+	return cancel && cancel->is_cancelled && cancel->is_cancelled(cancel->state);
+}
+
+int32_t CreateNativePlan(const void *descriptor, const PaimonPlanOptionsV1 *options,
+                         const PaimonReadCancellationV1 *cancel, void **out, uint64_t *count, char *error,
+                         uint64_t capacity) noexcept {
+	if (out) {
+		*out = nullptr;
+	}
+	if (count) {
+		*count = 0;
+	}
+	ReadBridgeError(PAIMON_READ_OK, "", error, capacity);
+	if (!descriptor || !options || options->struct_size != sizeof(*options) || !out || !count) {
+		return ReadBridgeError(PAIMON_READ_INVALID_ARGUMENT, "Invalid plan arguments", error, capacity);
+	}
+	try {
+		if (ReadCancelled(cancel)) {
+			return PAIMON_READ_CANCELLED;
+		}
+		if (options->planning_byte_limit != UINT64_MAX) {
+			return ReadBridgeError(PAIMON_READ_RESOURCE_REFUSED,
+			                       "Pinned native API cannot enforce a finite planning budget", error, capacity);
+		}
+		auto &read = static_cast<const RetainedPaimonRead *>(descriptor)->read;
+		if (!read.native_read_supported) {
+			return ReadBridgeError(PAIMON_READ_UNSUPPORTED,
+			                       "Native bridge requires append-only Parquet or ORC without data evolution", error,
+			                       capacity);
+		}
+		auto owner = std::make_shared<NativePlan>(read);
+		if (read.snapshot_id) {
+			paimon::ScanContextBuilder builder(read.table_data_path);
+			auto context = builder.SetOptions(read.options)
+			                   .SetTableSchema(read.table_schema_json)
+			                   .WithMemoryPool(owner->pool)
+			                   .WithExecutor(owner->executor)
+			                   .Finish();
+			if (!context.ok()) {
+				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot construct native scan context", error,
+				                       capacity);
+			}
+			auto scan = paimon::TableScan::Create(std::move(context).value());
+			if (!scan.ok()) {
+				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot construct native scan", error, capacity);
+			}
+			auto plan = scan.value()->CreatePlan();
+			if (!plan.ok()) {
+				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native planning failed for retained snapshot",
+				                       error, capacity);
+			}
+			owner->plan = std::move(plan).value();
+			if (!owner->plan || owner->plan->SnapshotId() != read.snapshot_id) {
+				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native plan changed retained snapshot", error,
+				                       capacity);
+			}
+		}
+		if (ReadCancelled(cancel)) {
+			return PAIMON_READ_CANCELLED;
+		}
+		auto handle = std::make_unique<NativePlanHandle>(std::move(owner));
+		*count = (*handle)->plan ? (*handle)->plan->Splits().size() : 0;
+		*out = handle.release();
+		return PAIMON_READ_OK;
+	} catch (const std::bad_alloc &) {
+		return ReadBridgeError(PAIMON_READ_OUT_OF_MEMORY, "Native planning allocation failed", error, capacity);
+	} catch (...) {
+		return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native planning exception", error, capacity);
+	}
+}
+
+void ReleaseNativePlan(void *plan) noexcept {
+	delete static_cast<NativePlanHandle *>(plan);
+}
+
+int32_t GetNativeSplit(const void *handle, uint64_t index, void **out) noexcept {
+	if (!out) {
+		return PAIMON_READ_INVALID_ARGUMENT;
+	}
+	*out = nullptr;
+	if (!handle) {
+		return PAIMON_READ_INVALID_ARGUMENT;
+	}
+	try {
+		auto &plan = *static_cast<const NativePlanHandle *>(handle);
+		if (!plan->plan || index >= plan->plan->Splits().size()) {
+			return PAIMON_READ_INVALID_ARGUMENT;
+		}
+		*out = new NativeSplit {plan, index};
+		return PAIMON_READ_OK;
+	} catch (const std::bad_alloc &) {
+		return PAIMON_READ_OUT_OF_MEMORY;
+	} catch (...) {
+		return PAIMON_READ_INTERNAL_ERROR;
+	}
+}
+
+void ReleaseNativeSplit(void *split) noexcept {
+	delete static_cast<NativeSplit *>(split);
+}
+
+int32_t OpenNativeReader(const void *handle, const PaimonReadCancellationV1 *cancel, void **out, char *error,
+                         uint64_t capacity) noexcept {
+	if (out) {
+		*out = nullptr;
+	}
+	ReadBridgeError(PAIMON_READ_OK, "", error, capacity);
+	if (!handle || !out) {
+		return PAIMON_READ_INVALID_ARGUMENT;
+	}
+	try {
+		if (ReadCancelled(cancel)) {
+			return PAIMON_READ_CANCELLED;
+		}
+		auto owner = std::make_shared<NativeReader>(*static_cast<const NativeSplit *>(handle));
+		auto &plan = *owner->split.plan;
+		auto &read = plan.read;
+		paimon::ReadContextBuilder builder(read.table_data_path);
+		auto context = builder.WithBranch(read.branch)
+		                   .SetOptions(read.options)
+		                   .SetTableSchema(read.table_schema_json)
+		                   .WithMemoryPool(plan.pool)
+		                   .WithExecutor(plan.executor)
+		                   .EnablePrefetch(false)
+		                   .EnableMultiThreadRowToBatch(false)
+		                   .Finish();
+		if (!context.ok()) {
+			return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot construct native read context", error, capacity);
+		}
+		auto table = paimon::TableRead::Create(std::move(context).value());
+		if (!table.ok()) {
+			return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot construct native table reader", error, capacity);
+		}
+		owner->table_read = std::move(table).value();
+		auto reader = owner->table_read->CreateReader(plan.plan->Splits()[owner->split.index]);
+		if (!reader.ok()) {
+			return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot open retained split", error, capacity);
+		}
+		owner->reader = std::move(reader).value();
+		if (ReadCancelled(cancel)) {
+			return PAIMON_READ_CANCELLED;
+		}
+		*out = new NativeReaderHandle(std::move(owner));
+		return PAIMON_READ_OK;
+	} catch (const std::bad_alloc &) {
+		return ReadBridgeError(PAIMON_READ_OUT_OF_MEMORY, "Native reader allocation failed", error, capacity);
+	} catch (...) {
+		return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native reader exception", error, capacity);
+	}
+}
+
+void ReleaseNativeReader(void *reader) noexcept {
+	delete static_cast<NativeReaderHandle *>(reader);
+}
+
+int32_t NextNativeBatch(void *handle, const PaimonReadCancellationV1 *cancel, void **out, const ArrowArray **array,
+                        const ArrowSchema **schema, char *error, uint64_t capacity) noexcept {
+	if (out) {
+		*out = nullptr;
+	}
+	if (array) {
+		*array = nullptr;
+	}
+	if (schema) {
+		*schema = nullptr;
+	}
+	ReadBridgeError(PAIMON_READ_OK, "", error, capacity);
+	if (!handle || !out || !array || !schema) {
+		return PAIMON_READ_INVALID_ARGUMENT;
+	}
+	auto &owner = *static_cast<NativeReaderHandle *>(handle);
+	std::unique_lock<std::mutex> lock;
+	try {
+		lock = std::unique_lock<std::mutex>(owner->mutex);
+		if (owner->batch_outstanding) {
+			return PAIMON_READ_RESOURCE_REFUSED;
+		}
+		if (owner->terminal_status != PAIMON_READ_OK) {
+			return owner->terminal_status;
+		}
+		// Mark failed before doing work: any exception leaves the reader terminal.
+		owner->terminal_status = PAIMON_READ_INTERNAL_ERROR;
+		if (ReadCancelled(cancel)) {
+			return owner->terminal_status = PAIMON_READ_CANCELLED;
+		}
+		// Allocate the owning shell BEFORE calling NextBatch. Exceptions later in
+		// this frame cannot strand a successfully returned native root.
+		auto batch = std::make_unique<NativeBatch>();
+		batch->owner = owner;
+		auto result = owner->reader->NextBatch();
+		if (!result.ok()) {
+			return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native batch read failed", error, capacity);
+		}
+		batch->data.roots = std::move(result).value();
+		if (ReadCancelled(cancel)) {
+			return owner->terminal_status = PAIMON_READ_CANCELLED;
+		}
+		if (paimon::BatchReader::IsEofBatch(batch->data.roots)) {
+			return owner->terminal_status = PAIMON_READ_EOF;
+		}
+		auto &roots = batch->data.roots;
+		if (!roots.first || !roots.first->release || !roots.second || !roots.second->release) {
+			return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Incomplete native Arrow roots", error, capacity);
+		}
+		*array = roots.first.get();
+		*schema = roots.second.get();
+		owner->batch_outstanding = true;
+		owner->terminal_status = PAIMON_READ_OK;
+		*out = batch.release();
+		return PAIMON_READ_OK;
+	} catch (const std::bad_alloc &) {
+		if (lock.owns_lock()) {
+			owner->terminal_status = PAIMON_READ_OUT_OF_MEMORY;
+		}
+		return ReadBridgeError(PAIMON_READ_OUT_OF_MEMORY, "Native batch allocation failed", error, capacity);
+	} catch (...) {
+		return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native batch exception", error, capacity);
+	}
+}
+
+void ReleaseNativeBatch(void *handle) noexcept {
+	if (!handle) {
+		return;
+	}
+	auto *batch = static_cast<NativeBatch *>(handle);
+	auto owner = batch->owner;
+	std::lock_guard<std::mutex> lock(owner->mutex);
+	delete batch;
+	owner->batch_outstanding = false;
+}
+
 shared_ptr<TableFunctionInfo> BoundReadBridgeInfo() {
-	static const PaimonReadBridgeV1 api {PAIMON_READ_BRIDGE_MAGIC,
-	                                     PAIMON_READ_BRIDGE_VERSION,
-	                                     sizeof(PaimonReadBridgeV1),
-	                                     AcceptsBoundRead,
-	                                     RetainBoundRead,
-	                                     DescribeBoundRead,
-	                                     ReleaseBoundRead};
-	static const auto info = make_shared_ptr<PaimonReadBridgeInfo>(api);
+	static const PaimonReadBridgeV2 api {{PAIMON_READ_BRIDGE_MAGIC, PAIMON_READ_BRIDGE_NATIVE_VERSION,
+	                                      sizeof(PaimonReadBridgeV2), AcceptsBoundRead, RetainBoundRead,
+	                                      DescribeBoundRead, ReleaseBoundRead},
+	                                     CreateNativePlan,
+	                                     ReleaseNativePlan,
+	                                     GetNativeSplit,
+	                                     ReleaseNativeSplit,
+	                                     OpenNativeReader,
+	                                     ReleaseNativeReader,
+	                                     NextNativeBatch,
+	                                     ReleaseNativeBatch};
+	static const auto info = make_shared_ptr<PaimonReadBridgeInfo>(api.descriptor);
 	return info;
 }
 
@@ -896,6 +1196,11 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	read.branch = target.branch;
 	read.read_schema_id = data_schema->Id();
 	read.options = ResolvePaimonOptions(*data_schema, paimon_options, read.branch);
+	auto evolution = read.options.find("data-evolution.enabled");
+	auto format = read.options.find("file.format");
+	read.native_read_supported =
+	    data_schema->PrimaryKeys().empty() && (evolution == read.options.end() || evolution->second == "false") &&
+	    (format == read.options.end() || format->second == "parquet" || format->second == "orc");
 	const auto requested_id = read.options.find("scan.snapshot-id");
 	const auto millis = read.options.find("scan.timestamp-millis");
 	const auto time_string = read.options.find("scan.timestamp");

@@ -22,7 +22,10 @@ enum PaimonReadStatus {
 	PAIMON_READ_INVALID_ARGUMENT = 1,
 	PAIMON_READ_UNSUPPORTED = 2,
 	PAIMON_READ_OUT_OF_MEMORY = 3,
-	PAIMON_READ_INTERNAL_ERROR = 4
+	PAIMON_READ_INTERNAL_ERROR = 4,
+	PAIMON_READ_EOF = 5,
+	PAIMON_READ_RESOURCE_REFUSED = 6,
+	PAIMON_READ_CANCELLED = 7
 };
 
 struct PaimonReadString {
@@ -66,3 +69,52 @@ struct PaimonReadBridgeV1 {
 	/* Release once; NULL is permitted. No concurrent release and describe. */
 	void (*release)(void *descriptor);
 };
+
+/* V2 preserves the descriptor prefix and adds experimental native reads.
+ * V1-only consumers must reject V2 rather than assume binary compatibility. */
+#define PAIMON_READ_BRIDGE_NATIVE_VERSION 2
+struct ArrowArray;
+struct ArrowSchema;
+
+/* Borrowed only for the duration of a call. Callback must be thread-safe and
+ * must not throw or re-enter the bridge. Cancellation is checked at whole-call
+ * boundaries; blocking native I/O and planning are not interruptible. */
+struct PaimonReadCancellationV1 {
+	const void *state;
+	int32_t (*is_cancelled)(const void *state);
+};
+
+struct PaimonPlanOptionsV1 {
+	uint64_t struct_size;
+	/* Finite limits are refused BEFORE native planning. UINT64_MAX explicitly
+	 * opts into unbounded planning for qualification, not production admission. */
+	uint64_t planning_byte_limit;
+};
+
+struct PaimonReadBridgeV2 {
+	struct PaimonReadBridgeV1 descriptor;
+	int32_t (*create_plan)(const void *descriptor, const struct PaimonPlanOptionsV1 *options,
+	                       const struct PaimonReadCancellationV1 *cancel, void **plan, uint64_t *split_count,
+	                       char *error, uint64_t error_capacity);
+	void (*release_plan)(void *plan);
+	int32_t (*get_split)(const void *plan, uint64_t index, void **split);
+	void (*release_split)(void *split);
+	int32_t (*open_reader)(const void *split, const struct PaimonReadCancellationV1 *cancel, void **reader, char *error,
+	                       uint64_t error_capacity);
+	void (*release_reader)(void *reader);
+	/* At most one outstanding batch per reader. A live batch refuses advancement.
+	 * Returned complete roots are borrowed, including _VALUE_KIND as column 0.
+	 * Never move, release, or modify roots/children. Release only via release_batch.
+	 * A batch retains reader/pool/plan owners, even after other handles release.
+	 * Error/cancellation terminates the reader; subsequent calls repeat status. */
+	int32_t (*next_batch)(void *reader, const struct PaimonReadCancellationV1 *cancel, void **batch,
+	                      const struct ArrowArray **array, const struct ArrowSchema **schema, char *error,
+	                      uint64_t error_capacity);
+	void (*release_batch)(void *batch);
+};
+/* Every handle is provider-owned; release exactly once, NULL permitted. Only
+ * live handles of the correct type from this provider are valid inputs.
+ * Keep the authenticated producer module and matching host loaded until ALL
+ * handles/roots release. Serialize operations/release on the same handle.
+ * Independent readers may run concurrently; one reader serializes native work.
+ * No replay, predicate, projection or hard memory-limit guarantee is supplied. */

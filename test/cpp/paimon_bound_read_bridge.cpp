@@ -26,6 +26,8 @@
 #include <fstream>
 #include <iterator>
 #include <type_traits>
+#include <thread>
+#include "duckdb/common/arrow/arrow.hpp"
 #if defined(__unix__) || defined(__APPLE__)
 #include <dlfcn.h>
 #endif
@@ -459,4 +461,321 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: unsupported binding is not empty
 	REQUIRE(api.retain(bound.data.get(), &descriptor.handle, error, sizeof(error)) == PAIMON_READ_UNSUPPORTED);
 	REQUIRE(descriptor.handle == nullptr);
 	REQUIRE(string(error) == "Bound Paimon read is unsupported");
+}
+
+static_assert(std::is_standard_layout<PaimonReadBridgeV2>::value, "Native bridge must have C layout");
+using NativeHandle = std::unique_ptr<void, void (*)(void *)>;
+
+static const PaimonReadBridgeV2 &NativeAPI(BridgeFixture &fixture, const BridgeBinding &bound) {
+	auto *api = TryGetPaimonNativeReadBridge(bound.function, fixture.trusted);
+	REQUIRE(api);
+#if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
+	BridgeFixture::CheckOrigin(reinterpret_cast<const void *>(api->create_plan));
+	BridgeFixture::CheckOrigin(reinterpret_cast<const void *>(api->next_batch));
+	BridgeFixture::CheckOrigin(reinterpret_cast<const void *>(api->release_batch));
+#endif
+	return *api;
+}
+
+static NativeHandle Plan(const PaimonReadBridgeV2 &api, Descriptor &descriptor, uint64_t &count) {
+	PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+	void *raw = nullptr;
+	char error[128];
+	auto status = api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, error, sizeof(error));
+	NativeHandle result(raw, api.release_plan);
+	INFO(error);
+	REQUIRE(status == PAIMON_READ_OK);
+	REQUIRE(result);
+	return result;
+}
+
+static NativeHandle Split(const PaimonReadBridgeV2 &api, const NativeHandle &plan, uint64_t index) {
+	void *raw = nullptr;
+	auto status = api.get_split(plan.get(), index, &raw);
+	NativeHandle result(raw, api.release_split);
+	REQUIRE(status == PAIMON_READ_OK);
+	REQUIRE(result);
+	return result;
+}
+
+static NativeHandle Reader(const PaimonReadBridgeV2 &api, const NativeHandle &split) {
+	void *raw = nullptr;
+	char error[128];
+	auto status = api.open_reader(split.get(), nullptr, &raw, error, sizeof(error));
+	NativeHandle result(raw, api.release_reader);
+	INFO(error);
+	REQUIRE(status == PAIMON_READ_OK);
+	REQUIRE(result);
+	return result;
+}
+
+static void CheckIntegerRoot(const ArrowArray &array, const ArrowSchema &schema, std::map<int32_t, int32_t> &rows) {
+	REQUIRE(array.release);
+	REQUIRE(schema.release);
+	REQUIRE(string(schema.format) == "+s");
+	REQUIRE(array.n_children == 3);
+	REQUIRE(schema.n_children == 3);
+	REQUIRE(string(schema.children[1]->name) == "id");
+	REQUIRE(string(schema.children[2]->name) == "value");
+	REQUIRE(string(schema.children[1]->format) == "i");
+	REQUIRE(string(schema.children[2]->format) == "i");
+	REQUIRE(array.length >= 0);
+	for (int col = 1; col <= 2; col++) {
+		REQUIRE(array.children[col]);
+		REQUIRE(array.children[col]->null_count == 0);
+		REQUIRE(array.children[col]->n_buffers == 2);
+		REQUIRE(array.children[col]->buffers[1]);
+	}
+	for (int64_t i = 0; i < array.length; i++) {
+		auto id =
+		    static_cast<const int32_t *>(array.children[1]->buffers[1])[i + array.offset + array.children[1]->offset];
+		auto value =
+		    static_cast<const int32_t *>(array.children[2]->buffers[1])[i + array.offset + array.children[2]->offset];
+		REQUIRE(rows.emplace(id, value).second);
+	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: retained snapshot reads across DSO and owner release",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	auto entry = GENERATE(0, 1, 2);
+	auto format = GENERATE("parquet", "orc");
+	SQL(*writer,
+	    "CREATE TABLE pm.race.payload (id INTEGER, value INTEGER) WITH ('file.format'='" + string(format) + "')");
+	SQL(*writer, "INSERT INTO pm.race.payload SELECT i::INTEGER, (i * 7)::INTEGER FROM range(5000) r(i)");
+	auto bound = Bind(entry, "payload");
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	bound.data.reset();
+	SQL(*writer, "INSERT INTO pm.race.payload VALUES (9000, -1)");
+	uint64_t count = 0;
+	auto plan = Plan(api, descriptor, count);
+	REQUIRE(count > 0);
+	api.descriptor.release(descriptor.handle);
+	descriptor.handle = nullptr;
+	std::map<int32_t, int32_t> rows;
+	for (uint64_t i = 0; i < count; i++) {
+		auto split = Split(api, plan, i);
+		auto native_reader = Reader(api, split);
+		split.reset();
+		for (;;) {
+			void *raw = nullptr;
+			const ArrowArray *array = nullptr;
+			const ArrowSchema *schema = nullptr;
+			auto status = api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0);
+			NativeHandle batch(raw, api.release_batch);
+			if (status == PAIMON_READ_EOF) {
+				REQUIRE_FALSE(batch);
+				REQUIRE_FALSE(array);
+				REQUIRE_FALSE(schema);
+				REQUIRE(api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0) ==
+				        PAIMON_READ_EOF);
+				break;
+			}
+			REQUIRE(status == PAIMON_READ_OK);
+			REQUIRE(batch);
+			REQUIRE(array);
+			REQUIRE(schema);
+			// A second request cannot invalidate or overwrite this root.
+			void *refused = reinterpret_cast<void *>(1);
+			const ArrowArray *refused_array = array;
+			const ArrowSchema *refused_schema = schema;
+			REQUIRE(api.next_batch(native_reader.get(), nullptr, &refused, &refused_array, &refused_schema, nullptr,
+			                       0) == PAIMON_READ_RESOURCE_REFUSED);
+			REQUIRE_FALSE(refused);
+			REQUIRE_FALSE(refused_array);
+			REQUIRE_FALSE(refused_schema);
+			CheckIntegerRoot(*array, *schema, rows);
+		}
+	}
+	REQUIRE(rows.size() == 5000);
+	for (int32_t id = 0; id < 5000; id++) {
+		REQUIRE(rows.at(id) == id * 7);
+	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: batch retains reader and plan until complete-root release",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7), (2, 14)");
+	auto bound = Bind();
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	uint64_t count;
+	auto plan = Plan(api, descriptor, count);
+	REQUIRE(count == 1);
+	auto split = Split(api, plan, 0);
+	auto native_reader = Reader(api, split);
+	void *raw = nullptr;
+	const ArrowArray *array = nullptr;
+	const ArrowSchema *schema = nullptr;
+	int32_t status = -1;
+	// Serialized worker handover, with no assertion library calls on the worker.
+	std::thread worker(
+	    [&]() { status = api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0); });
+	worker.join();
+	NativeHandle batch(raw, api.release_batch);
+	REQUIRE(status == PAIMON_READ_OK);
+	REQUIRE(batch);
+	native_reader.reset();
+	split.reset();
+	plan.reset();
+	api.descriptor.release(descriptor.handle);
+	descriptor.handle = nullptr;
+	bound.data.reset();
+	std::map<int32_t, int32_t> rows;
+	CheckIntegerRoot(*array, *schema, rows);
+	REQUIRE((rows == std::map<int32_t, int32_t> {{1, 7}, {2, 14}}));
+	batch.reset();
+	SQL(*writer, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: empty at bind never reads a later snapshot",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	auto bound = Bind(GENERATE(0, 1, 2));
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
+	uint64_t count = 99;
+	auto plan = Plan(api, descriptor, count);
+	REQUIRE(count == 0);
+	void *split = reinterpret_cast<void *>(1);
+	REQUIRE(api.get_split(plan.get(), 0, &split) == PAIMON_READ_INVALID_ARGUMENT);
+	REQUIRE_FALSE(split);
+}
+
+struct CancelAfterChecks {
+	int checks = 0;
+	int cancel_at;
+	static int32_t Check(const void *ptr) {
+		auto &state = *const_cast<CancelAfterChecks *>(static_cast<const CancelAfterChecks *>(ptr));
+		return ++state.checks >= state.cancel_at;
+	}
+};
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: refuses budgets before I/O and clears all failed outputs",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
+	auto bound = Bind();
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	std::filesystem::remove_all(warehouse);
+	PaimonPlanOptionsV1 options {sizeof(options), 1024};
+	void *plan = reinterpret_cast<void *>(1);
+	uint64_t count = 99;
+	char error[128];
+	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+	        PAIMON_READ_RESOURCE_REFUSED);
+	REQUIRE_FALSE(plan);
+	REQUIRE(count == 0);
+	REQUIRE(string(error).find("budget") != string::npos);
+	options.planning_byte_limit = UINT64_MAX;
+	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+	        PAIMON_READ_INTERNAL_ERROR);
+	REQUIRE_FALSE(plan);
+	REQUIRE(count == 0);
+	REQUIRE(api.create_plan(nullptr, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+	        PAIMON_READ_INVALID_ARGUMENT);
+	options.struct_size--;
+	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+	        PAIMON_READ_INVALID_ARGUMENT);
+	REQUIRE_FALSE(plan);
+	REQUIRE(count == 0);
+	api.release_plan(nullptr);
+	api.release_split(nullptr);
+	api.release_reader(nullptr);
+	api.release_batch(nullptr);
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: missing retained snapshots and payloads are errors not EOF",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
+	auto bound = Bind();
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	SECTION("retained snapshot expired despite newer snapshot") {
+		SQL(*writer, "INSERT INTO pm.race.t VALUES (2, 14)");
+		REQUIRE(std::filesystem::remove(warehouse + "/race.db/t/snapshot/snapshot-1"));
+		uint64_t count = 9;
+		void *raw = nullptr;
+		PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+		REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, nullptr, 0) ==
+		        PAIMON_READ_INTERNAL_ERROR);
+		REQUIRE_FALSE(raw);
+		REQUIRE(count == 0);
+	}
+	SECTION("data removed after plan") {
+		uint64_t count;
+		auto plan = Plan(api, descriptor, count);
+		REQUIRE(count == 1);
+		auto split = Split(api, plan, 0);
+		uint64_t removed = 0;
+		for (auto &file : std::filesystem::recursive_directory_iterator(warehouse)) {
+			if (file.path().extension() == ".parquet") {
+				removed += std::filesystem::remove(file.path());
+			}
+		}
+		REQUIRE(removed > 0);
+		void *raw = nullptr;
+		auto status = api.open_reader(split.get(), nullptr, &raw, nullptr, 0);
+		NativeHandle native_reader(raw, api.release_reader);
+		if (status == PAIMON_READ_OK) {
+			const ArrowArray *array = nullptr;
+			const ArrowSchema *schema = nullptr;
+			status = api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0);
+			REQUIRE_FALSE(raw);
+			REQUIRE_FALSE(array);
+			REQUIRE_FALSE(schema);
+			REQUIRE(api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0) == status);
+		}
+		REQUIRE(status == PAIMON_READ_INTERNAL_ERROR);
+	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and after native calls publishes nothing",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
+	auto bound = Bind();
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	auto boundary = GENERATE(1, 2);
+	CancelAfterChecks state {0, boundary};
+	PaimonReadCancellationV1 cancel {&state, CancelAfterChecks::Check};
+	SECTION("planning") {
+		uint64_t count = 99;
+		void *raw = nullptr;
+		PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+		REQUIRE(api.create_plan(descriptor.handle, &options, &cancel, &raw, &count, nullptr, 0) ==
+		        PAIMON_READ_CANCELLED);
+		REQUIRE_FALSE(raw);
+		REQUIRE(count == 0);
+	}
+	SECTION("reader creation") {
+		uint64_t count;
+		auto plan = Plan(api, descriptor, count);
+		auto split = Split(api, plan, 0);
+		void *raw = nullptr;
+		REQUIRE(api.open_reader(split.get(), &cancel, &raw, nullptr, 0) == PAIMON_READ_CANCELLED);
+		REQUIRE_FALSE(raw);
+	}
+	SECTION("batch creation, including successful native root discarded on cancellation") {
+		uint64_t count;
+		auto plan = Plan(api, descriptor, count);
+		auto split = Split(api, plan, 0);
+		auto native_reader = Reader(api, split);
+		void *raw = nullptr;
+		const ArrowArray *array = nullptr;
+		const ArrowSchema *schema = nullptr;
+		REQUIRE(api.next_batch(native_reader.get(), &cancel, &raw, &array, &schema, nullptr, 0) ==
+		        PAIMON_READ_CANCELLED);
+		REQUIRE_FALSE(raw);
+		REQUIRE_FALSE(array);
+		REQUIRE_FALSE(schema);
+		REQUIRE(api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0) ==
+		        PAIMON_READ_CANCELLED);
+	}
 }
