@@ -372,9 +372,15 @@ int32_t OpenNativeReader(const void *handle, const PaimonReadCancellationV1 *can
 		auto owner = std::make_shared<NativeReader>(*static_cast<const NativeSplit *>(handle));
 		auto &plan = *owner->split.plan;
 		auto &read = plan.read;
+		// Constrain format-owned parallelism too: the pinned Parquet default
+		// changes Arrow's process-global CPU pool and enables async prebuffering.
+		// These operational overrides do not alter the descriptor's query options.
+		auto options = read.options;
+		options["parquet.read.executor.thread-count"] = "0";
+		options["parquet.read.enable-pre-buffer"] = "false";
 		paimon::ReadContextBuilder builder(read.table_data_path);
 		auto context = builder.WithBranch(read.branch)
-		                   .SetOptions(read.options)
+		                   .SetOptions(options)
 		                   .SetTableSchema(read.table_schema_json)
 		                   .WithMemoryPool(plan.pool)
 		                   .WithExecutor(plan.executor)

@@ -55,7 +55,7 @@ struct PaimonBoundReadViewV1 {
 	const struct PaimonReadOption *options;
 };
 
-/* Descriptor-only interface. V1 does not authorize planning, reading or replay. */
+/* Descriptor-only interface. Exact V1 does not authorize planning, reading or replay. */
 struct PaimonReadBridgeV1 {
 	uint64_t magic;
 	uint32_t version;

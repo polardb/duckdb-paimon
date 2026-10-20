@@ -539,8 +539,8 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: retained snapshot reads a
                  "[paimon][bound_read_bridge][native_read_bridge]") {
 	auto entry = GENERATE(0, 1, 2);
 	auto format = GENERATE("parquet", "orc");
-	SQL(*writer,
-	    "CREATE TABLE pm.race.payload (id INTEGER, value INTEGER) WITH ('file.format'='" + string(format) + "')");
+	SQL(*writer, "CREATE TABLE pm.race.payload (id INTEGER, value INTEGER) WITH ('file.format'='" + string(format) +
+	                 "', 'parquet.read.executor.thread-count'='invalid', 'parquet.read.enable-pre-buffer'='invalid')");
 	SQL(*writer, "INSERT INTO pm.race.payload SELECT i::INTEGER, (i * 7)::INTEGER FROM range(5000) r(i)");
 	auto bound = Bind(entry, "payload");
 	auto &api = NativeAPI(*this, bound);
@@ -778,4 +778,82 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and a
 		REQUIRE(api.next_batch(native_reader.get(), nullptr, &raw, &array, &schema, nullptr, 0) ==
 		        PAIMON_READ_CANCELLED);
 	}
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: exact V1 remains descriptor-only and malformed V2 is refused",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	auto bound = Bind();
+	auto native = NativeAPI(*this, bound);
+	SECTION("synthetic authenticated V1 provider") {
+		auto prefix = native.descriptor;
+		prefix.version = PAIMON_READ_BRIDGE_VERSION;
+		prefix.struct_size = sizeof(prefix);
+		auto definition = trusted;
+		definition.function_info = make_shared_ptr<PaimonReadBridgeInfo>(prefix);
+		REQUIRE(TryGetPaimonReadBridge(definition, definition) == &prefix);
+		REQUIRE_FALSE(TryGetPaimonNativeReadBridge(definition, definition));
+		Descriptor descriptor(prefix);
+		Retain(bound, descriptor);
+		REQUIRE(descriptor.View().has_snapshot == 0);
+		return;
+	}
+	SECTION("missing planning") {
+		native.create_plan = nullptr;
+	}
+	SECTION("missing plan release") {
+		native.release_plan = nullptr;
+	}
+	SECTION("missing split access") {
+		native.get_split = nullptr;
+	}
+	SECTION("missing split release") {
+		native.release_split = nullptr;
+	}
+	SECTION("missing reader creation") {
+		native.open_reader = nullptr;
+	}
+	SECTION("missing reader release") {
+		native.release_reader = nullptr;
+	}
+	SECTION("missing batch read") {
+		native.next_batch = nullptr;
+	}
+	SECTION("missing batch release") {
+		native.release_batch = nullptr;
+	}
+	auto definition = trusted;
+	definition.function_info = make_shared_ptr<PaimonReadBridgeInfo>(native.descriptor);
+	REQUIRE_FALSE(TryGetPaimonNativeReadBridge(definition, definition));
+	REQUIRE_FALSE(TryGetPaimonNativeReadBridge(TableFunction(), trusted));
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: validates handle outputs and refuses unqualified reader kinds",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	auto bound = Bind();
+	auto &api = NativeAPI(*this, bound);
+	void *raw = reinterpret_cast<void *>(1);
+	const ArrowArray *array = reinterpret_cast<const ArrowArray *>(1);
+	const ArrowSchema *schema = reinterpret_cast<const ArrowSchema *>(1);
+	REQUIRE(api.get_split(nullptr, 0, &raw) == PAIMON_READ_INVALID_ARGUMENT);
+	REQUIRE_FALSE(raw);
+	REQUIRE(api.open_reader(nullptr, nullptr, &raw, nullptr, 0) == PAIMON_READ_INVALID_ARGUMENT);
+	REQUIRE_FALSE(raw);
+	REQUIRE(api.next_batch(nullptr, nullptr, &raw, &array, &schema, nullptr, 0) == PAIMON_READ_INVALID_ARGUMENT);
+	REQUIRE_FALSE(raw);
+	REQUIRE_FALSE(array);
+	REQUIRE_FALSE(schema);
+	auto table = GENERATE("pk", "evolved");
+	if (string(table) == "pk") {
+		SQL(*writer, "CREATE TABLE pm.race.pk (id INTEGER PRIMARY KEY) WITH ('bucket'='1')");
+	} else {
+		SQL(*writer, "CREATE TABLE pm.race.evolved (id INTEGER) WITH ('data-evolution.enabled'='true')");
+	}
+	auto unsupported = Bind(0, table);
+	Descriptor descriptor(api.descriptor);
+	Retain(unsupported, descriptor);
+	uint64_t count = 99;
+	PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, nullptr, 0) == PAIMON_READ_UNSUPPORTED);
+	REQUIRE_FALSE(raw);
+	REQUIRE(count == 0);
 }
