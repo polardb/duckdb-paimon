@@ -36,8 +36,10 @@ The selected native revision is
 `53f9c86d45aabb0a6f1a379271da07d7a9f27a3d`. At that revision, retaining the
 underlying native memory pool alone does not keep every Arrow pool adaptor
 alive. The tests retain the reader tree and table/scan owners until root release;
-they do not claim roots may outlive readers. Upstream paimon-cpp #260 changes
-that contract at `885b2c00e7438d87c8e80512f0743f2bb8e3ce93`, which is not the
+keeping the table/scan owners alive is test conservatism, not a qualified
+requirement for consumers. They do not claim roots may outlive readers. Upstream
+paimon-cpp #260 changes that contract at
+`885b2c00e7438d87c8e80512f0743f2bb8e3ce93`, which is not the
 current gitlink. No dependency upgrade or replacement lifetime API is included.
 
 Re-reading retained values, checking release callbacks and observing zero final
