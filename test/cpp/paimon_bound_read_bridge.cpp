@@ -846,7 +846,8 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: validates handle outputs 
 	if (string(table) == "pk") {
 		SQL(*writer, "CREATE TABLE pm.race.pk (id INTEGER PRIMARY KEY) WITH ('bucket'='1')");
 	} else {
-		SQL(*writer, "CREATE TABLE pm.race.evolved (id INTEGER) WITH ('data-evolution.enabled'='true')");
+		SQL(*writer, "CREATE TABLE pm.race.evolved (id INTEGER) WITH ('data-evolution.enabled'='true', "
+		             "'row-tracking.enabled'='true')");
 	}
 	auto unsupported = Bind(0, table);
 	Descriptor descriptor(api.descriptor);
