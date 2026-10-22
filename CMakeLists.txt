@@ -242,8 +242,15 @@ if(BUILD_UNITTESTS)
     test/cpp/paimon_read_bridge_c.c)
   target_include_directories(unittest_paimon_bridge
                              PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
-  target_link_libraries(unittest_paimon_bridge duckdb duckdb_yyjson
-                        ${CMAKE_DL_LIBS})
+  if(PAIMON_BRIDGE_BUILTIN)
+    # Distribution builds provide duckdb_static through PREBUILT_BINARY.
+    target_link_libraries(unittest_paimon_bridge duckdb_static)
+    link_extension_libraries(unittest_paimon_bridge "")
+    link_threads(unittest_paimon_bridge "")
+  else()
+    target_link_libraries(unittest_paimon_bridge duckdb)
+  endif()
+  target_link_libraries(unittest_paimon_bridge duckdb_yyjson ${CMAKE_DL_LIBS})
   target_compile_definitions(
     unittest_paimon_bridge
     PRIVATE
