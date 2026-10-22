@@ -227,7 +227,15 @@ target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 
 if(BUILD_UNITTESTS)
-  # Same contracts run on the default built-in host and the DONT_LINK test host.
+  # SHOULD_LINK is resolved by DuckDB after extension subdirectories configure.
+  # Use the same resolver now so explicit static-link overrides are respected.
+  duckdb_resolve_static_link(PAIMON_TEST_CAPABILITIES
+                             PAIMON_TEST_LINKED_EXTENSIONS)
+  set(PAIMON_BRIDGE_BUILTIN FALSE)
+  if(paimon IN_LIST PAIMON_TEST_LINKED_EXTENSIONS)
+    set(PAIMON_BRIDGE_BUILTIN TRUE)
+  endif()
+  # Same contracts run on the built-in and dynamic-only hosts.
   add_executable(
     unittest_paimon_bridge EXCLUDE_FROM_ALL
     test/cpp/main.cpp test/cpp/paimon_bound_read_bridge.cpp
@@ -239,7 +247,7 @@ if(BUILD_UNITTESTS)
   target_compile_definitions(
     unittest_paimon_bridge
     PRIVATE
-      PAIMON_BRIDGE_BUILTIN=$<BOOL:${DUCKDB_EXTENSION_PAIMON_SHOULD_LINK}>
+      PAIMON_BRIDGE_BUILTIN=$<BOOL:${PAIMON_BRIDGE_BUILTIN}>
       PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
       PAIMON_BRIDGE_EXTENSION_PATH="$<TARGET_FILE:${TARGET_NAME}_loadable_extension>"
   )
