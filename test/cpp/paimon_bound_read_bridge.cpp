@@ -142,14 +142,16 @@ struct BridgeFixture {
 			BridgeBinding bound;
 			auto &context = *reader->context;
 			if (entry == 2) {
-				auto &catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName("pm", "race", Identifier(table)));
+				auto &catalog_entry =
+				    Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName("pm", "race", Identifier(table)));
 				bound.function = BoundTableFunction(catalog_entry.GetScanFunction(context, bound.data));
 			} else {
 				auto &catalog_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(
 				    context, QualifiedName(SYSTEM_CATALOG, DEFAULT_SCHEMA, "paimon_scan"));
 				auto argument_count = entry == 0 ? 1 : 3;
 				vector<LogicalType> argument_types(argument_count, LogicalType::VARCHAR);
-				bound.function = BoundTableFunction(catalog_entry.functions.GetFunctionByArguments(context, argument_types));
+				bound.function =
+				    BoundTableFunction(catalog_entry.functions.GetFunctionByArguments(context, argument_types));
 				REQUIRE(bound.function.bind);
 				vector<Value> args = entry == 0 ? vector<Value> {Value(warehouse + "/race.db/" + table)}
 				                                : vector<Value> {Value(warehouse), Value("race"), Value(table)};
