@@ -40,6 +40,7 @@
 #include "paimon_type_utils.hpp"
 #include "paimon_snapshot_resolver.hpp"
 #include "paimon_read_target.hpp"
+#include "paimon_read_bridge.hpp"
 
 #include "paimon/api.h"
 #include "paimon/catalog/identifier.h"
@@ -48,6 +49,7 @@
 #include "paimon/schema/schema.h"
 
 #include <string>
+#include <new>
 
 namespace duckdb {
 
@@ -100,6 +102,107 @@ public:
 		return bound_read.branch;
 	}
 };
+
+namespace {
+
+PaimonReadString ReadString(const string &value) noexcept {
+	return {value.data(), value.size()};
+}
+
+struct RetainedPaimonRead {
+	explicit RetainedPaimonRead(const PaimonScanBindData &bind) : path(bind.path), read(bind.bound_read) {
+		options.reserve(read.options.size());
+		for (auto &option : read.options) {
+			options.push_back({ReadString(option.first), ReadString(option.second)});
+		}
+	}
+	PaimonTablePath path;
+	PaimonBoundRead read;
+	vector<PaimonReadOption> options;
+};
+
+int32_t AcceptsBoundRead(const void *data) noexcept {
+	return data && dynamic_cast<const PaimonScanBindData *>(static_cast<const FunctionData *>(data)) ? 1 : 0;
+}
+
+int32_t ReadBridgeError(int32_t status, const char *message, char *error, uint64_t capacity) noexcept {
+	if (error && capacity) {
+		uint64_t i = 0;
+		while (i < capacity - 1 && message[i]) {
+			error[i] = message[i];
+			i++;
+		}
+		error[i] = '\0';
+	}
+	return status;
+}
+
+int32_t RetainBoundRead(const void *data, void **descriptor, char *error, uint64_t capacity) noexcept {
+	if (error && capacity) {
+		error[0] = '\0';
+	}
+	if (!descriptor) {
+		return ReadBridgeError(PAIMON_READ_INVALID_ARGUMENT, "Missing descriptor output", error, capacity);
+	}
+	*descriptor = nullptr;
+	if (!AcceptsBoundRead(data)) {
+		return ReadBridgeError(PAIMON_READ_INVALID_ARGUMENT, "Not a Paimon scan binding", error, capacity);
+	}
+	auto &bind = *static_cast<const PaimonScanBindData *>(static_cast<const FunctionData *>(data));
+	if (bind.bound_read.deferred_error) {
+		return ReadBridgeError(PAIMON_READ_UNSUPPORTED, "Bound Paimon read is unsupported", error, capacity);
+	}
+	try {
+		*descriptor = new RetainedPaimonRead(bind);
+		return PAIMON_READ_OK;
+	} catch (const std::bad_alloc &) {
+		return ReadBridgeError(PAIMON_READ_OUT_OF_MEMORY, "Cannot retain Paimon binding", error, capacity);
+	} catch (...) {
+		return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot retain Paimon binding", error, capacity);
+	}
+}
+
+int32_t DescribeBoundRead(const void *descriptor, PaimonBoundReadViewV1 *view, uint64_t view_size) noexcept {
+	if (!view || view_size < sizeof(*view)) {
+		return PAIMON_READ_INVALID_ARGUMENT;
+	}
+	*view = {};
+	if (!descriptor) {
+		return PAIMON_READ_INVALID_ARGUMENT;
+	}
+	auto &owner = *static_cast<const RetainedPaimonRead *>(descriptor);
+	auto &read = owner.read;
+	view->warehouse = ReadString(owner.path.warehouse);
+	view->database = ReadString(owner.path.dbname);
+	view->table = ReadString(owner.path.tablename);
+	view->location = ReadString(read.table_data_path);
+	view->branch = ReadString(read.branch);
+	view->schema_json = ReadString(read.table_schema_json);
+	view->schema_id = read.read_schema_id;
+	view->has_snapshot = read.snapshot_id.has_value() ? 1 : 0;
+	view->snapshot_id = read.snapshot_id.value_or(0);
+	view->option_count = owner.options.size();
+	view->options = owner.options.data();
+	return PAIMON_READ_OK;
+}
+
+void ReleaseBoundRead(void *descriptor) noexcept {
+	delete static_cast<RetainedPaimonRead *>(descriptor);
+}
+
+shared_ptr<TableFunctionInfo> BoundReadBridgeInfo() {
+	static const PaimonReadBridgeV1 api {PAIMON_READ_BRIDGE_MAGIC,
+	                                     PAIMON_READ_BRIDGE_VERSION,
+	                                     sizeof(PaimonReadBridgeV1),
+	                                     AcceptsBoundRead,
+	                                     RetainBoundRead,
+	                                     DescribeBoundRead,
+	                                     ReleaseBoundRead};
+	static const auto info = make_shared_ptr<PaimonReadBridgeInfo>(api);
+	return info;
+}
+
+} // namespace
 
 static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundFunctionExpression &comp,
                                                                const LogicalGet &get) {
@@ -1183,6 +1286,7 @@ static InsertionOrderPreservingMap<string> PaimonScanToString(TableFunctionToStr
 static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 	auto fun = TableFunction("paimon_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
+	fun.function_info = BoundReadBridgeInfo();
 	fun.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated: auto-detected from table schema
 		options.Add("file_format", LogicalType::VARCHAR);     // deprecated: auto-detected from table schema
@@ -1211,6 +1315,7 @@ static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 static void AddPaimonScanFullPathFunction(CreateTableFunctionInfo &info) {
 	auto fun_fullpath =
 	    TableFunction("paimon_scan", {LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
+	fun_fullpath.function_info = BoundReadBridgeInfo();
 	fun_fullpath.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated
 		options.Add("file_format", LogicalType::VARCHAR);     // deprecated

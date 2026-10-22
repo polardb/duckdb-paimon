@@ -227,6 +227,49 @@ target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 
 if(BUILD_UNITTESTS)
+  # SHOULD_LINK is resolved by DuckDB after extension subdirectories configure.
+  # Use the same resolver now so explicit static-link overrides are respected.
+  duckdb_resolve_static_link(PAIMON_TEST_CAPABILITIES
+                             PAIMON_TEST_LINKED_EXTENSIONS)
+  set(PAIMON_BRIDGE_BUILTIN FALSE)
+  if(paimon IN_LIST PAIMON_TEST_LINKED_EXTENSIONS)
+    set(PAIMON_BRIDGE_BUILTIN TRUE)
+  endif()
+  # Same contracts run on the built-in and dynamic-only hosts.
+  add_executable(
+    unittest_paimon_bridge EXCLUDE_FROM_ALL
+    test/cpp/main.cpp test/cpp/paimon_bound_read_bridge.cpp
+    test/cpp/paimon_read_bridge_c.c)
+  target_include_directories(unittest_paimon_bridge
+                             PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
+  if(PAIMON_BRIDGE_BUILTIN)
+    # Distribution builds provide duckdb_static through PREBUILT_BINARY.
+    target_link_libraries(unittest_paimon_bridge duckdb_static)
+    link_extension_libraries(unittest_paimon_bridge "")
+    link_threads(unittest_paimon_bridge "")
+  else()
+    target_link_libraries(unittest_paimon_bridge duckdb)
+  endif()
+  target_link_libraries(unittest_paimon_bridge duckdb_yyjson ${CMAKE_DL_LIBS})
+  target_compile_definitions(
+    unittest_paimon_bridge
+    PRIVATE
+      PAIMON_BRIDGE_BUILTIN=$<BOOL:${PAIMON_BRIDGE_BUILTIN}>
+      PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+      PAIMON_BRIDGE_EXTENSION_PATH="$<TARGET_FILE:${TARGET_NAME}_loadable_extension>"
+  )
+  add_dependencies(unittest_paimon_bridge ${TARGET_NAME}_loadable_extension)
+  set_target_properties(
+    unittest_paimon_bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                                      "${CMAKE_BINARY_DIR}/test")
+  add_custom_target(
+    paimon_check_bound_read_bridge
+    COMMAND
+      ${CMAKE_COMMAND} "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon_bridge>"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/bridge-test-work" -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+    DEPENDS unittest_paimon_bridge
+    USES_TERMINAL)
   add_executable(
     unittest_paimon EXCLUDE_FROM_ALL
     test/cpp/main.cpp test/cpp/paimon_read_target.cpp
