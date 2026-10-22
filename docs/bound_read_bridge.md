@@ -187,7 +187,7 @@ Arrow global thread settings. It does not certify a bound on all process
 threads or remote-filesystem internals.
 
 Run the tests through `paimon_check_bound_read_bridge`, including on the
-`test/extension_config_bridge.cmake` DONT_LINK host from the dynamic bridge
+`test/extension_config_bridge.cmake` dynamic-only host from the dynamic bridge
 workflow. The consumer includes DuckDB and the C bridge headers, never native
 Paimon/Arrow C++ headers or libraries. Tests compare 5000 integer payloads and
 unique complete IDs for both formats and all three entry points, exercise old
