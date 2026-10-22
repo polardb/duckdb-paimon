@@ -118,7 +118,7 @@ struct BridgeFixture {
 		reader->BeginTransaction();
 		auto &entry = Catalog::GetEntry<TableFunctionCatalogEntry>(
 		    *reader->context, QualifiedName(SYSTEM_CATALOG, DEFAULT_SCHEMA, "paimon_scan"));
-		trusted = entry.functions.GetFunctionByOffset(0);
+		trusted = *entry.functions.GetFunctionByOffset(0);
 		reader->Commit();
 #if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
 		CheckOrigin(reinterpret_cast<const void *>(trusted.function));
@@ -311,7 +311,10 @@ TEST_CASE("Paimon bridge: missing dynamic producer cannot become success", "[pai
 	auto catalog_absent = [&]() {
 		auto result = con.Query("SELECT count(*) FROM duckdb_functions() WHERE function_name='paimon_scan'");
 		REQUIRE_FALSE(result->HasError());
-		REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 0);
+		auto chunk = result->Fetch();
+		REQUIRE(chunk);
+		REQUIRE(chunk->size() == 1);
+		REQUIRE(chunk->GetValue(0, 0).GetValue<int64_t>() == 0);
 	};
 	catalog_absent();
 	auto missing = std::filesystem::path(PAIMON_BRIDGE_EXTENSION_PATH).parent_path() /
