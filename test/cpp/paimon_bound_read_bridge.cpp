@@ -109,6 +109,8 @@ struct BridgeFixture {
 
 	BridgeFixture() {
 		config.SetOptionByName("allow_unsigned_extensions", Value(true));
+		config.SetOptionByName("autoinstall_known_extensions", Value(false));
+		config.SetOptionByName("autoload_known_extensions", Value(false));
 		db = make_uniq<DuckDB>(nullptr, &config);
 		reader = make_uniq<Connection>(*db);
 		writer = make_uniq<Connection>(*db);
@@ -308,6 +310,8 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: retained identity outlives bindi
 TEST_CASE("Paimon bridge: missing dynamic producer cannot become success", "[paimon][bound_read_bridge_dynamic]") {
 	DBConfig config;
 	config.SetOptionByName("allow_unsigned_extensions", Value(true));
+	config.SetOptionByName("autoinstall_known_extensions", Value(false));
+	config.SetOptionByName("autoload_known_extensions", Value(false));
 	DuckDB db(nullptr, &config);
 	Connection con(db);
 	auto catalog_absent = [&]() {

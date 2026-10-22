@@ -71,14 +71,14 @@ catalog, type or scan mode.
 `make test_release`, `make test_debug` and `make test_reldebug` include
 `paimon_check_bound_read_bridge`. The default host has built-in Paimon, so this
 lane checks descriptor contracts, NOT cross-DSO qualification. The same tests in
-the separate `DONT_LINK` configuration below LOAD the real dynamic extension;
+the separate dynamic-only configuration below LOAD the real dynamic extension;
 that consumer links only DuckDB, without Paimon/Arrow C++ libraries or a built-in
 producer. On Linux/macOS the dynamic lane also checks that callback addresses
 belong to the loaded extension. A missing producer must fail. The public C header
 is compiled as C. Both lanes are required for bridge qualification; a passing
 built-in lane does not substitute for dynamic evidence.
 
-The `Dynamic Bound Read Bridge` workflow runs the focused DONT_LINK target with
+The `Dynamic Bound Read Bridge` workflow runs the focused dynamic-only target with
 optimized Clang on Linux and macOS for pushes and pull requests. It retains test
 reports, build configuration and failing warehouses from the same runner root;
 successful warehouses are removed. Cloud backends are disabled
@@ -100,7 +100,7 @@ with the tracked dynamic-only extension configuration (plus the platform's usual
 native dependency/toolchain options):
 
 ```sh
-cmake -S duckdb -B build/bridge -DDUCKDB_EXTENSION_CONFIGS="$PWD/test/extension_config_bridge.cmake"
+cmake -S duckdb -B build/bridge -DOVERRIDE_GIT_DESCRIBE=v2.0.0 -DDUCKDB_EXTENSION_CONFIGS="$PWD/test/extension_config_bridge.cmake"
 cmake --build build/bridge --target paimon_check_bound_read_bridge
 ```
 

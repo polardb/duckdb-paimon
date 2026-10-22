@@ -32,14 +32,14 @@ jobs:
           ninja --version | tee -a bridge-toolchain.log
           "$CC" --version | tee -a bridge-toolchain.log
           "$CXX" --version | tee -a bridge-toolchain.log
-      - name: Configure isolated DONT_LINK host
+      - name: Configure isolated dynamic-only host
         shell: bash
         run: |
           cmake -S duckdb -B build/bridge -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DOVERRIDE_GIT_DESCRIBE=v2.0.0 \
             -DDUCKDB_EXTENSION_CONFIGS="$PWD/test/extension_config_bridge.cmake" \
             -DPAIMON_ENABLE_OSS=OFF -DPAIMON_ENABLE_S3=OFF -DPAIMON_ENABLE_REST=OFF \
-            -DENABLE_EXTENSION_AUTOINSTALL=OFF -DENABLE_EXTENSION_AUTOLOADING=OFF \
             -DENABLE_UNITTEST_CPP_TESTS=OFF 2>&1 | tee bridge-configure.log
       - name: Build and test real hidden producer
         shell: bash
