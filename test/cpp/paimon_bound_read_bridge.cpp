@@ -95,7 +95,7 @@ struct Descriptor {
 };
 
 struct BridgeBinding {
-	TableFunction function;
+	BoundTableFunction function;
 	unique_ptr<FunctionData> data;
 };
 
@@ -116,8 +116,8 @@ struct BridgeFixture {
 		SQL(*reader, "LOAD " + Value(PAIMON_BRIDGE_EXTENSION_PATH).ToSQLString());
 #endif
 		reader->BeginTransaction();
-		auto &entry = Catalog::GetSystemCatalog(*reader->context)
-		                  .GetEntry<TableFunctionCatalogEntry>(*reader->context, DEFAULT_SCHEMA, "paimon_scan");
+		auto &entry = Catalog::GetEntry<TableFunctionCatalogEntry>(
+		    *reader->context, QualifiedName(SYSTEM_CATALOG, DEFAULT_SCHEMA, "paimon_scan"));
 		trusted = entry.functions.GetFunctionByOffset(0);
 		reader->Commit();
 #if !PAIMON_BRIDGE_BUILTIN && (defined(__unix__) || defined(__APPLE__))
@@ -142,24 +142,21 @@ struct BridgeFixture {
 			BridgeBinding bound;
 			auto &context = *reader->context;
 			if (entry == 2) {
-				auto &catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, "pm", "race", table);
-				bound.function = catalog_entry.GetScanFunction(context, bound.data);
+				auto &catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName("pm", "race", Identifier(table)));
+				bound.function = BoundTableFunction(catalog_entry.GetScanFunction(context, bound.data));
 			} else {
-				auto &catalog_entry = Catalog::GetSystemCatalog(context).GetEntry<TableFunctionCatalogEntry>(
-				    context, DEFAULT_SCHEMA, "paimon_scan");
+				auto &catalog_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(
+				    context, QualifiedName(SYSTEM_CATALOG, DEFAULT_SCHEMA, "paimon_scan"));
 				auto argument_count = entry == 0 ? 1 : 3;
-				for (idx_t i = 0; i < catalog_entry.functions.Size(); i++) {
-					auto function = catalog_entry.functions.GetFunctionByOffset(i);
-					if (function.arguments.size() == idx_t(argument_count)) {
-						bound.function = function;
-					}
-				}
+				vector<LogicalType> argument_types(argument_count, LogicalType::VARCHAR);
+				bound.function = BoundTableFunction(catalog_entry.functions.GetFunctionByArguments(context, argument_types));
 				REQUIRE(bound.function.bind);
 				vector<Value> args = entry == 0 ? vector<Value> {Value(warehouse + "/race.db/" + table)}
 				                                : vector<Value> {Value(warehouse), Value("race"), Value(table)};
-				named_parameter_map_t parameters;
+				named_argument_map_t parameters;
+				bound.function.SetCallArguments(args, parameters);
 				vector<LogicalType> input_types, return_types;
-				vector<string> input_names, names;
+				vector<Identifier> input_names, names;
 				TableFunctionRef ref;
 				TableFunctionBindInput input(args, parameters, input_types, input_names, nullptr, nullptr,
 				                             bound.function, ref);
@@ -230,9 +227,9 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon bridge: discovery rejects foreign defini
 	}
 	SECTION("foreign scan with genuine wrapper") {
 		reader->BeginTransaction();
-		auto &foreign = Catalog::GetSystemCatalog(*reader->context)
-		                    .GetEntry<TableFunctionCatalogEntry>(*reader->context, DEFAULT_SCHEMA, "repeat");
-		candidate = foreign.functions.GetFunctionByOffset(0);
+		auto &foreign = Catalog::GetEntry<TableFunctionCatalogEntry>(
+		    *reader->context, QualifiedName(SYSTEM_CATALOG, DEFAULT_SCHEMA, "repeat"));
+		candidate = BoundTableFunction(foreign.functions.GetFunctionByOffset(0));
 		reader->Commit();
 		REQUIRE(candidate.function);
 		REQUIRE(candidate.function != trusted.function);

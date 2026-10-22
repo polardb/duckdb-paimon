@@ -246,11 +246,12 @@ if(BUILD_UNITTESTS)
       "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/bridge-test-work" -P
       "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
     DEPENDS unittest_paimon_bridge USES_TERMINAL)
-  add_executable(unittest_paimon EXCLUDE_FROM_ALL test/cpp/main.cpp
-                 test/cpp/paimon_read_target.cpp
-                 test/cpp/paimon_snapshot_binding.cpp
-                 test/cpp/paimon_snapshot_resolver.cpp)
-  target_compile_definitions(unittest_paimon PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
+  add_executable(
+    unittest_paimon EXCLUDE_FROM_ALL
+    test/cpp/main.cpp test/cpp/paimon_read_target.cpp
+    test/cpp/paimon_snapshot_binding.cpp test/cpp/paimon_snapshot_resolver.cpp)
+  target_compile_definitions(unittest_paimon
+                             PRIVATE ${PAIMON_FEATURE_DEFINITIONS})
   if(PAIMON_ENABLE_REST)
     target_sources(unittest_paimon PRIVATE test/cpp/paimon_rest_branch.cpp)
     target_include_directories(unittest_paimon SYSTEM

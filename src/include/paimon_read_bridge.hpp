@@ -28,7 +28,7 @@ struct PaimonReadBridgeInfo final : public TableFunctionInfo {
 // trusted must be an unmodified definition from an independently authenticated
 // provider, kept alive with its module. A catalog name alone is not sufficient.
 // Authenticate before downcasting: hidden provider/consumer RTTI need not agree.
-inline const PaimonReadBridgeV1 *TryGetPaimonReadBridge(const TableFunction &candidate, const TableFunction &trusted) {
+inline const PaimonReadBridgeV1 *TryGetPaimonReadBridge(const BaseTableFunction &candidate, const BaseTableFunction &trusted) {
 	if (!trusted.function || !trusted.bind || !trusted.init_global || !trusted.init_local || !trusted.function_info ||
 	    candidate.function != trusted.function || candidate.bind != trusted.bind ||
 	    candidate.init_global != trusted.init_global || candidate.init_local != trusted.init_local ||
