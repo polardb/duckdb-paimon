@@ -855,7 +855,14 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	if (!arrow_schema_result.ok()) {
 		throw IOException(arrow_schema_result.status().ToString());
 	}
-	auto arrow_schema = std::move(arrow_schema_result).value();
+	auto arrow_raw = std::move(arrow_schema_result).value();
+	auto release_schema = [](ArrowSchema *schema) {
+		if (schema->release) {
+			schema->release(schema);
+		}
+		delete schema;
+	};
+	std::unique_ptr<ArrowSchema, decltype(release_schema)> arrow_schema(arrow_raw.release(), release_schema);
 	if (!arrow_schema) {
 		throw IOException("Paimon Arrow schema is empty");
 	}
@@ -868,10 +875,6 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	return_types = arrow_table.GetTypes();
 
 	bind_data->arrow_table = std::move(arrow_table);
-
-	if (arrow_schema && arrow_schema->release) {
-		arrow_schema->release(arrow_schema.get());
-	}
 
 	return std::move(bind_data);
 }

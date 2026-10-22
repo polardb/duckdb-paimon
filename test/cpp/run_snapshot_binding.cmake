@@ -24,6 +24,9 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -E env "PAIMON_TEST_ROOT=${warehouse}
   "${TEST_BINARY}" "[paimon]" --warn NoTests --reporter compact
   RESULT_VARIABLE result TIMEOUT 180)
 if(NOT "${result}" STREQUAL "0")
-  message(FATAL_ERROR "Snapshot binding test failed (${result}); inputs preserved at ${warehouse}")
+  if(EXISTS "${warehouse}")
+    message(FATAL_ERROR "Paimon callback test failed (${result}); inputs preserved at ${warehouse}")
+  endif()
+  message(FATAL_ERROR "Paimon callback test failed (${result})")
 endif()
 file(REMOVE_RECURSE "${warehouse}")
