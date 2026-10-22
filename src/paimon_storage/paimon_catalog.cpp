@@ -27,6 +27,8 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
@@ -97,7 +99,7 @@ static string GetValidatedFormatOption(const unordered_map<string, Value> &input
 static void AddOptionalSecretOption(const KeyValueSecret &secret, const string &secret_key, const string &option_key,
                                     map<string, string> &paimon_options) {
 	Value value;
-	if (secret.TryGetValue(secret_key, value)) {
+	if (secret.TryGetValue(Identifier(secret_key), value)) {
 		paimon_options[option_key] = value.ToString();
 	}
 }
@@ -105,7 +107,7 @@ static void AddOptionalSecretOption(const KeyValueSecret &secret, const string &
 static void AddRequiredSecretOption(const KeyValueSecret &secret, const string &secret_key, const string &option_key,
                                     map<string, string> &paimon_options) {
 	Value value;
-	if (!secret.TryGetValue(secret_key, value) || value.ToString().empty()) {
+	if (!secret.TryGetValue(Identifier(secret_key), value) || value.ToString().empty()) {
 		throw InvalidInputException("Missing required Paimon secret option \"%s\"", secret_key);
 	}
 	paimon_options[option_key] = value.ToString();
@@ -284,14 +286,14 @@ string PaimonCatalog::GetCatalogType() {
 
 optional_ptr<CatalogEntry> PaimonCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	bool ignore_if_exists = info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT;
-	auto status = paimon_catalog->CreateDatabase(info.schema, {}, ignore_if_exists);
+	auto status = paimon_catalog->CreateDatabase(info.SchemaName().GetIdentifierName(), {}, ignore_if_exists);
 	if (!status.ok()) {
 		if (status.IsExist() || status.IsNotExist()) {
 			throw CatalogException(status.ToString());
 		}
 		throw IOException(status.ToString());
 	}
-	return schemas.CreateEntry(info.schema);
+	return schemas.CreateEntry(info.SchemaName().GetIdentifierName());
 }
 
 optional_ptr<SchemaCatalogEntry> PaimonCatalog::LookupSchema(CatalogTransaction transaction,
@@ -323,7 +325,8 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 	CheckRESTCatalogWriteSupported(attached_options);
 
 	auto &base = op.info->Base();
-	paimon::Identifier table_identifier(base.schema, base.table);
+	paimon::Identifier table_identifier(base.GetQualifiedName().Schema().GetIdentifierName(),
+	                                    base.GetTableName().GetIdentifierName());
 	auto paimon_options = GetPaimonOptions(context, path, attached_options);
 
 	vector<string> part_keys;
@@ -331,7 +334,7 @@ PhysicalOperator &PaimonCatalog::PlanCreateTableAs(ClientContext &context, Physi
 		if (part_expr->GetExpressionType() != ExpressionType::COLUMN_REF) {
 			throw InvalidInputException("Paimon partition key must be a column reference");
 		}
-		part_keys.push_back(part_expr->Cast<ColumnRefExpression>().GetColumnName());
+		part_keys.push_back(part_expr->Cast<ColumnRefExpression>().GetColumnName().GetIdentifierName());
 	}
 
 	auto &insert = planner.Make<PhysicalPaimonInsert>(op, op.schema, std::move(op.info), std::move(table_identifier),
@@ -348,7 +351,7 @@ PhysicalOperator &PaimonCatalog::PlanInsert(ClientContext &context, PhysicalPlan
 	CheckRESTCatalogWriteSupported(attached_options);
 
 	auto &table = op.table;
-	paimon::Identifier table_identifier(table.schema.name, table.name);
+	paimon::Identifier table_identifier(table.schema.name.GetIdentifierName(), table.name.GetIdentifierName());
 	auto paimon_options = GetPaimonOptions(context, path, attached_options);
 
 	vector<string> part_keys;
@@ -411,14 +414,15 @@ ErrorData PaimonCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 
 void PaimonCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	bool ignore_if_not_exists = info.if_not_found == OnEntryNotFound::RETURN_NULL;
-	auto status = paimon_catalog->DropDatabase(info.name, ignore_if_not_exists, info.cascade);
+	auto status = paimon_catalog->DropDatabase(info.GetQualifiedName().Name().GetIdentifierName(), ignore_if_not_exists,
+	                                           info.cascade);
 	if (!status.ok()) {
 		if (status.IsExist() || status.IsNotExist()) {
 			throw CatalogException(status.ToString());
 		}
 		throw IOException(status.ToString());
 	}
-	schemas.DropEntry(info.name);
+	schemas.DropEntry(info.GetQualifiedName().Name().GetIdentifierName());
 }
 
 } // namespace duckdb

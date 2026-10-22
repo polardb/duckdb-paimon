@@ -9,6 +9,17 @@ SELECT count(*) FROM paimon_snapshots('./data/testdb.db/testtbl');
 ----
 3
 
+# Both overloads still accept the deprecated named option.
+query I
+SELECT count(*) FROM paimon_snapshots('./data/testdb.db/testtbl', manifest_format='avro');
+----
+3
+
+query I
+SELECT count(*) FROM paimon_snapshots('./data', 'testdb', 'testtbl', manifest_format='avro');
+----
+3
+
 # 3-arg form: verify key columns across all snapshots
 query IIIII
 SELECT snapshot_id, schema_id, commit_kind, total_record_count, delta_record_count

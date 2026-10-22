@@ -284,6 +284,11 @@ David	2
 Eve	2
 Frank	2
 
+# BETWEEN must reach Paimon split pruning after expression binding.
+query II
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', debug_expected_splits=0) WHERE f1 BETWEEN 100 AND 200;
+----
+
 # predicate pushdown: NOT BETWEEN
 query II
 SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl') WHERE f1 NOT BETWEEN 1 AND 2;

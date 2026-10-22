@@ -155,3 +155,51 @@ DROP SCHEMA IF EXISTS pm.__test_ddl;
 
 statement ok
 DETACH pm;
+
+# Preserve quoted names across DuckDB identifiers and Paimon catalog strings.
+statement ok
+ATTACH '{TEST_DIR}/quoted_names' AS quoted_pm (TYPE paimon);
+
+statement ok
+CREATE SCHEMA quoted_pm."Mixed Schema";
+
+statement ok
+CREATE TABLE quoted_pm."Mixed Schema"."Mixed Table" WITH ('bucket' = 1, 'bucket-key' = 'Mixed Column') AS SELECT 1 AS "Mixed Column";
+
+statement ok
+INSERT INTO quoted_pm."Mixed Schema"."Mixed Table" ("mixed column") VALUES (2);
+
+query I
+SELECT "mixed column" FROM quoted_pm."Mixed Schema"."Mixed Table" WHERE "mixed column" BETWEEN 1 AND 2 ORDER BY 1;
+----
+1
+2
+
+statement ok
+DETACH quoted_pm;
+
+statement ok
+ATTACH '{TEST_DIR}/quoted_names' AS quoted_pm (TYPE paimon);
+
+query T
+SELECT column_name FROM duckdb_columns()
+WHERE database_name = 'quoted_pm'
+  AND schema_name = 'Mixed Schema'
+  AND table_name = 'Mixed Table';
+----
+Mixed Column
+
+query I
+SELECT "mixed column" FROM quoted_pm."Mixed Schema"."Mixed Table" ORDER BY 1;
+----
+1
+2
+
+statement ok
+DROP TABLE quoted_pm."Mixed Schema"."Mixed Table";
+
+statement ok
+DROP SCHEMA quoted_pm."Mixed Schema";
+
+statement ok
+DETACH quoted_pm;

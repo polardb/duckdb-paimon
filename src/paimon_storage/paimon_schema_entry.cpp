@@ -95,7 +95,7 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 
 	auto &catalog = ParentCatalog().Cast<PaimonCatalog>();
 	auto &paimon_catalog = catalog.GetPaimonCatalog();
-	paimon::Identifier identifier(name, base.table);
+	paimon::Identifier identifier(name.GetIdentifierName(), base.GetTableName().GetIdentifierName());
 
 	auto col_names = base.columns.GetColumnNames();
 	auto col_types = base.columns.GetColumnTypes();
@@ -126,7 +126,7 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 			primary_keys.push_back(col_names[col_idx.index]);
 		} else {
 			for (auto &col_name : unique.GetColumnNames()) {
-				primary_keys.push_back(col_name);
+				primary_keys.push_back(col_name.GetIdentifierName());
 			}
 		}
 	}
@@ -134,7 +134,7 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 	vector<string> partition_keys;
 	for (auto &pk_expr : base.partition_keys) {
 		if (pk_expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
-			partition_keys.push_back(pk_expr->Cast<ColumnRefExpression>().GetColumnName());
+			partition_keys.push_back(pk_expr->Cast<ColumnRefExpression>().GetColumnName().GetIdentifierName());
 		} else {
 			throw InvalidInputException("Paimon partition key must be a column reference");
 		}
@@ -144,12 +144,12 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 	for (auto &opt : base.options) {
 		auto &expr = *opt.second;
 		if (expr.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
-			auto &val = expr.Cast<ConstantExpression>().value;
+			auto val = expr.Cast<ConstantExpression>().GetLiteral().ToValue();
 			if (!val.IsNull()) {
 				paimon_options[opt.first] = val.ToString();
 			}
 		} else if (expr.GetExpressionType() == ExpressionType::COLUMN_REF) {
-			paimon_options[opt.first] = expr.Cast<ColumnRefExpression>().GetColumnName();
+			paimon_options[opt.first] = expr.Cast<ColumnRefExpression>().GetColumnName().GetIdentifierName();
 		} else {
 			throw InvalidInputException("Paimon table option '%s' must be a literal value", opt.first);
 		}
@@ -168,7 +168,7 @@ optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateTable(CatalogTransaction tra
 		throw IOException(status.ToString());
 	}
 
-	return tables.RefreshEntry(transaction.GetContext(), base.table);
+	return tables.RefreshEntry(transaction.GetContext(), base.GetTableName().GetIdentifierName());
 }
 
 optional_ptr<CatalogEntry> PaimonSchemaEntry::CreateView(CatalogTransaction, CreateViewInfo &) {
@@ -206,7 +206,7 @@ void PaimonSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 
 	auto &catalog = ParentCatalog().Cast<PaimonCatalog>();
 	auto &paimon_catalog = catalog.GetPaimonCatalog();
-	paimon::Identifier identifier(name, info.name);
+	paimon::Identifier identifier(name.GetIdentifierName(), info.GetQualifiedName().Name().GetIdentifierName());
 
 	bool ignore_if_not_exists = info.if_not_found == OnEntryNotFound::RETURN_NULL;
 	auto status = paimon_catalog.DropTable(identifier, ignore_if_not_exists);
@@ -217,7 +217,7 @@ void PaimonSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		throw IOException(status.ToString());
 	}
 
-	tables.DropEntry(info.name);
+	tables.DropEntry(info.GetQualifiedName().Name().GetIdentifierName());
 }
 
 void PaimonSchemaEntry::Alter(CatalogTransaction, AlterInfo &) {

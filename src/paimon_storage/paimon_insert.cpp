@@ -26,6 +26,7 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/common/vector/vector_iterator.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -344,10 +345,9 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 	auto &gstate = input.global_state.Cast<PaimonInsertGlobalState>();
 	auto &lstate = input.local_state.Cast<PaimonInsertLocalState>();
 	for (auto column : gstate.bucket_info.primary_key_ids) {
-		UnifiedVectorFormat format;
-		chunk.data[column].ToUnifiedFormat(chunk.size(), format);
+		auto validity = chunk.data[column].Validity();
 		for (idx_t row = 0; row < chunk.size(); row++) {
-			if (!format.validity.RowIsValid(format.sel->get_index(row))) {
+			if (!validity.IsValid(row)) {
 				throw ConstraintException("Paimon primary-key columns cannot contain NULL");
 			}
 		}
@@ -406,9 +406,10 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 	auto &part_names = gstate.part_key_names;
 	D_ASSERT(part_idxs.size() == part_names.size());
 
-	vector<UnifiedVectorFormat> part_formats(part_idxs.size());
+	vector<VectorValidityIterator> part_validity;
+	part_validity.reserve(part_idxs.size());
 	for (idx_t i = 0; i < part_idxs.size(); i++) {
-		chunk.data[part_idxs[i]].ToUnifiedFormat(num_rows, part_formats[i]);
+		part_validity.emplace_back(chunk.data[part_idxs[i]]);
 	}
 
 	std::map<std::pair<std::vector<string>, int32_t>, vector<idx_t>> partition_groups;
@@ -416,8 +417,7 @@ SinkResultType PhysicalPaimonInsert::Sink(ExecutionContext &context, DataChunk &
 		std::vector<string> key;
 		key.reserve(part_idxs.size());
 		for (idx_t i = 0; i < part_idxs.size(); i++) {
-			auto idx = part_formats[i].sel->get_index(row);
-			if (!part_formats[i].validity.RowIsValid(idx)) {
+			if (!part_validity[i].IsValid(row)) {
 				key.push_back(gstate.null_part_name);
 			} else {
 				key.push_back(chunk.GetValue(part_idxs[i], row).ToString());
@@ -546,8 +546,8 @@ SourceResultType PhysicalPaimonInsert::GetDataInternal(ExecutionContext &context
 		return SourceResultType::FINISHED;
 	}
 
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(gstate.insert_count));
+	chunk.data[0].Append(Value::BIGINT(gstate.insert_count));
+	chunk.CheckCardinality(1);
 	gstate.finished = true;
 
 	return SourceResultType::HAVE_MORE_OUTPUT;

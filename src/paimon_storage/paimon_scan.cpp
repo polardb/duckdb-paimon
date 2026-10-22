@@ -101,10 +101,10 @@ public:
 	}
 };
 
-static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundComparisonExpression &comp,
+static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundFunctionExpression &comp,
                                                                const LogicalGet &get) {
 	// early exit: only handle comparison types supported by paimon-cpp
-	switch (comp.type) {
+	switch (comp.GetExpressionType()) {
 	case ExpressionType::COMPARE_EQUAL:
 	case ExpressionType::COMPARE_NOTEQUAL:
 	case ExpressionType::COMPARE_LESSTHAN:
@@ -117,27 +117,27 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 
 	// normalize to col OP constant
-	Expression *col_expr = nullptr;
-	Expression *const_expr = nullptr;
-	ExpressionType comparison_type = comp.type;
+	const Expression *col_expr = nullptr;
+	const Expression *const_expr = nullptr;
+	ExpressionType comparison_type = comp.GetExpressionType();
 
-	if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-	    comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		col_expr = comp.left.get();
-		const_expr = comp.right.get();
-	} else if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
-	           comp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-		col_expr = comp.right.get();
-		const_expr = comp.left.get();
-		comparison_type = FlipComparisonExpression(comp.type);
+	if (BoundComparisonExpression::Left(comp).GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+	    BoundComparisonExpression::Right(comp).GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		col_expr = &BoundComparisonExpression::Left(comp);
+		const_expr = &BoundComparisonExpression::Right(comp);
+	} else if (BoundComparisonExpression::Left(comp).GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+	           BoundComparisonExpression::Right(comp).GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		col_expr = &BoundComparisonExpression::Right(comp);
+		const_expr = &BoundComparisonExpression::Left(comp);
+		comparison_type = FlipComparisonExpression(comp.GetExpressionType());
 	} else {
 		return nullptr;
 	}
 
-	auto filter_binding_idx = col_expr->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto filter_binding_idx = col_expr->Cast<BoundColumnRefExpression>().Binding().column_index;
 	auto col_idx = get.GetColumnIds()[filter_binding_idx];
 
-	auto val = const_expr->Cast<BoundConstantExpression>().value;
+	auto val = const_expr->Cast<BoundConstantExpression>().GetValue();
 	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
 	auto literal = PaimonTypeUtils::ConvertLiteral(val, paimon_type);
 	if (!literal) {
@@ -145,7 +145,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 
 	auto field_index = col_idx.GetPrimaryIndex();
-	auto &field_name = get.GetColumnName(col_idx);
+	auto &field_name = get.GetColumnName(col_idx).GetIdentifierName();
 
 	switch (comparison_type) {
 	case ExpressionType::COMPARE_EQUAL:
@@ -165,39 +165,40 @@ static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundCompar
 	}
 }
 
-static std::shared_ptr<paimon::Predicate> TryConvertBetween(const BoundBetweenExpression &between,
+static std::shared_ptr<paimon::Predicate> TryConvertBetween(const BoundFunctionExpression &between,
                                                             const LogicalGet &get) {
-	if (between.input->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
-	    between.lower->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
-	    between.upper->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+	if (BoundBetweenExpression::Input(between).GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+	    BoundBetweenExpression::LowerBound(between).GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
+	    BoundBetweenExpression::UpperBound(between).GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 		return nullptr;
 	}
 
-	auto filter_binding_idx = between.input->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto filter_binding_idx =
+	    BoundBetweenExpression::Input(between).Cast<BoundColumnRefExpression>().Binding().column_index;
 	auto col_idx = get.GetColumnIds()[filter_binding_idx];
 	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
 
-	auto lower_literal =
-	    PaimonTypeUtils::ConvertLiteral(between.lower->Cast<BoundConstantExpression>().value, paimon_type);
-	auto upper_literal =
-	    PaimonTypeUtils::ConvertLiteral(between.upper->Cast<BoundConstantExpression>().value, paimon_type);
+	auto lower_literal = PaimonTypeUtils::ConvertLiteral(
+	    BoundBetweenExpression::LowerBound(between).Cast<BoundConstantExpression>().GetValue(), paimon_type);
+	auto upper_literal = PaimonTypeUtils::ConvertLiteral(
+	    BoundBetweenExpression::UpperBound(between).Cast<BoundConstantExpression>().GetValue(), paimon_type);
 	if (!lower_literal || !upper_literal) {
 		return nullptr;
 	}
 
 	auto field_index = col_idx.GetPrimaryIndex();
-	auto &field_name = get.GetColumnName(col_idx);
+	auto &field_name = get.GetColumnName(col_idx).GetIdentifierName();
 
 	// Decompose into two comparison predicates combined with AND.  paimon-cpp's
 	// Between() is itself just GreaterOrEqual + LessOrEqual + And, so there is no
 	// benefit in special-casing inclusive bounds — this unified path handles every
 	// combination (inclusive, exclusive, or mixed) produced by the optimizer.
 	auto lower_pred =
-	    between.lower_inclusive
+	    BoundBetweenExpression::LowerInclusive(between)
 	        ? paimon::PredicateBuilder::GreaterOrEqual(field_index, field_name, paimon_type, lower_literal.value())
 	        : paimon::PredicateBuilder::GreaterThan(field_index, field_name, paimon_type, lower_literal.value());
 	auto upper_pred =
-	    between.upper_inclusive
+	    BoundBetweenExpression::UpperInclusive(between)
 	        ? paimon::PredicateBuilder::LessOrEqual(field_index, field_name, paimon_type, upper_literal.value())
 	        : paimon::PredicateBuilder::LessThan(field_index, field_name, paimon_type, upper_literal.value());
 	auto result = paimon::PredicateBuilder::And({lower_pred, upper_pred});
@@ -209,23 +210,23 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 
 static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperatorExpression &op, const LogicalGet &get) {
 	// Validate children count per operator type.
-	switch (op.type) {
+	switch (op.GetExpressionType()) {
 	case ExpressionType::COMPARE_IN:
 	case ExpressionType::COMPARE_NOT_IN:
-		D_ASSERT(op.children.size() >= 2);
+		D_ASSERT(op.GetChildren().size() >= 2);
 		break;
 	case ExpressionType::OPERATOR_IS_NULL:
 	case ExpressionType::OPERATOR_IS_NOT_NULL:
 	case ExpressionType::OPERATOR_NOT:
-		D_ASSERT(op.children.size() == 1);
+		D_ASSERT(op.GetChildren().size() == 1);
 		break;
 	default:
 		return nullptr;
 	}
 
 	// NOT wraps an arbitrary sub-expression; handle it before the column-ref gate.
-	if (op.type == ExpressionType::OPERATOR_NOT) {
-		auto child_pred = TryConvertExpression(*op.children[0], get);
+	if (op.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+		auto child_pred = TryConvertExpression(*op.GetChildren()[0], get);
 		if (!child_pred) {
 			return nullptr;
 		}
@@ -234,18 +235,18 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 	}
 
 	// From here on, the first child must be a column reference.
-	if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+	if (op.GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 		return nullptr;
 	}
 
 	// Get column index and name.
-	auto filter_binding_idx = op.children[0]->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto filter_binding_idx = op.GetChildren()[0]->Cast<BoundColumnRefExpression>().Binding().column_index;
 	auto col_idx = get.GetColumnIds()[filter_binding_idx];
 	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
 	auto field_index = col_idx.GetPrimaryIndex();
-	auto &field_name = get.GetColumnName(col_idx);
+	auto &field_name = get.GetColumnName(col_idx).GetIdentifierName();
 
-	switch (op.type) {
+	switch (op.GetExpressionType()) {
 	case ExpressionType::OPERATOR_IS_NULL:
 		return paimon::PredicateBuilder::IsNull(field_index, field_name, paimon_type);
 	case ExpressionType::OPERATOR_IS_NOT_NULL:
@@ -254,17 +255,17 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 	case ExpressionType::COMPARE_NOT_IN: {
 		// Collect literals from children[1..n].
 		std::vector<paimon::Literal> literals;
-		for (idx_t i = 1; i < op.children.size(); i++) {
-			if (op.children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		for (idx_t i = 1; i < op.GetChildren().size(); i++) {
+			if (op.GetChildren()[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 				// Best effort pushdown.
-				if (op.type == ExpressionType::COMPARE_NOT_IN) {
+				if (op.GetExpressionType() == ExpressionType::COMPARE_NOT_IN) {
 					continue;
 				} else {
 					return nullptr;
 				}
 			}
 
-			auto val = op.children[i]->Cast<BoundConstantExpression>().value;
+			auto val = op.GetChildren()[i]->Cast<BoundConstantExpression>().GetValue();
 			if (val.IsNull()) {
 				// Paimon scan validation rejects NULL literals; keep the residual filter.
 				return nullptr;
@@ -272,7 +273,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 			auto literal = PaimonTypeUtils::ConvertLiteral(val, paimon_type);
 			if (!literal) {
 				// Same reason as above: best effort pushdown.
-				if (op.type == ExpressionType::COMPARE_NOT_IN) {
+				if (op.GetExpressionType() == ExpressionType::COMPARE_NOT_IN) {
 					continue;
 				} else {
 					return nullptr;
@@ -285,7 +286,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertOperator(const BoundOperator
 			return nullptr;
 		}
 
-		if (op.type == ExpressionType::COMPARE_IN) {
+		if (op.GetExpressionType() == ExpressionType::COMPARE_IN) {
 			return paimon::PredicateBuilder::In(field_index, field_name, paimon_type, literals);
 		} else {
 			return paimon::PredicateBuilder::NotIn(field_index, field_name, paimon_type, literals);
@@ -300,7 +301,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConju
                                                                 const LogicalGet &get) {
 	std::vector<std::shared_ptr<paimon::Predicate>> predicates;
 
-	for (auto &child : conj.children) {
+	for (auto &child : conj.GetChildren()) {
 		auto pred = TryConvertExpression(*child, get);
 		if (pred) {
 			predicates.push_back(std::move(pred));
@@ -311,7 +312,7 @@ static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConju
 
 		// For AND: skip unconvertible children (they stay in DuckDB's filter).
 		// For OR: the entire OR must be convertible, otherwise give up.
-		if (conj.type == ExpressionType::CONJUNCTION_OR) {
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
 			return nullptr;
 		}
 	}
@@ -321,10 +322,10 @@ static std::shared_ptr<paimon::Predicate> TryConvertConjunction(const BoundConju
 		return nullptr;
 	}
 
-	if (conj.type == ExpressionType::CONJUNCTION_AND) {
+	if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 		auto result = paimon::PredicateBuilder::And(predicates);
 		return result.ok() ? std::move(result.value()) : nullptr;
-	} else if (conj.type == ExpressionType::CONJUNCTION_OR) {
+	} else if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
 		auto result = paimon::PredicateBuilder::Or(predicates);
 		return result.ok() ? std::move(result.value()) : nullptr;
 	}
@@ -357,22 +358,22 @@ static PushdownFunction ClassifyFunction(const string &name) {
 static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunctionExpression &func,
                                                              const LogicalGet &get) {
 	// Gate: reject unsupported functions early.
-	auto func_type = ClassifyFunction(func.function.name);
+	auto func_type = ClassifyFunction(func.Function().GetName().GetIdentifierName());
 	if (func_type == PushdownFunction::UNSUPPORTED) {
 		return nullptr;
 	}
 
 	// All supported functions need at least a column ref as the first argument.
-	D_ASSERT(func.children.size() >= 1);
-	if (func.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+	D_ASSERT(func.GetChildren().size() >= 1);
+	if (func.GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 		return nullptr;
 	}
 
 	// Extract column metadata.
-	auto filter_binding_idx = func.children[0]->Cast<BoundColumnRefExpression>().binding.column_index;
+	auto filter_binding_idx = func.GetChildren()[0]->Cast<BoundColumnRefExpression>().Binding().column_index;
 	auto col_idx = get.GetColumnIds()[filter_binding_idx];
 	auto field_index = col_idx.GetPrimaryIndex();
-	auto &field_name = get.GetColumnName(col_idx);
+	auto &field_name = get.GetColumnName(col_idx).GetIdentifierName();
 	auto paimon_type = PaimonTypeUtils::ConvertFieldType(get.GetColumnType(col_idx));
 
 	// Per-category validation and argument extraction.
@@ -387,12 +388,12 @@ static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunction
 		if (paimon_type != paimon::FieldType::STRING) {
 			return nullptr;
 		}
-		D_ASSERT(func.children.size() == 2);
-		if (func.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		D_ASSERT(func.GetChildren().size() == 2);
+		if (func.GetChildren()[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 			return nullptr;
 		}
 
-		auto &pattern_value = func.children[1]->Cast<BoundConstantExpression>().value;
+		auto &pattern_value = func.GetChildren()[1]->Cast<BoundConstantExpression>().GetValue();
 		pattern_literal = PaimonTypeUtils::ConvertLiteral(pattern_value, paimon_type);
 		if (!pattern_literal) {
 			return nullptr;
@@ -429,15 +430,17 @@ static std::shared_ptr<paimon::Predicate> TryConvertFunction(const BoundFunction
 
 static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression &expr, const LogicalGet &get) {
 	switch (expr.GetExpressionClass()) {
-	case ExpressionClass::BOUND_COMPARISON:
-		return TryConvertComparison(expr.Cast<BoundComparisonExpression>(), get);
 	case ExpressionClass::BOUND_CONJUNCTION:
 		return TryConvertConjunction(expr.Cast<BoundConjunctionExpression>(), get);
-	case ExpressionClass::BOUND_BETWEEN:
-		return TryConvertBetween(expr.Cast<BoundBetweenExpression>(), get);
 	case ExpressionClass::BOUND_OPERATOR:
 		return TryConvertOperator(expr.Cast<BoundOperatorExpression>(), get);
 	case ExpressionClass::BOUND_FUNCTION:
+		if (BoundComparisonExpression::IsComparison(expr)) {
+			return TryConvertComparison(expr.Cast<BoundFunctionExpression>(), get);
+		}
+		if (expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			return TryConvertBetween(expr.Cast<BoundFunctionExpression>(), get);
+		}
 		return TryConvertFunction(expr.Cast<BoundFunctionExpression>(), get);
 	default:
 		return nullptr;
@@ -447,29 +450,29 @@ static std::shared_ptr<paimon::Predicate> TryConvertExpression(const Expression 
 static bool TryExtractPartitionFilter(const Expression &expr, const LogicalGet &get,
                                       const unordered_set<string> &part_keys, map<string, string> &part_filter) {
 	switch (expr.GetExpressionClass()) {
-	case ExpressionClass::BOUND_COMPARISON: {
-		auto &comp = expr.Cast<BoundComparisonExpression>();
-		if (comp.type != ExpressionType::COMPARE_EQUAL) {
+	case ExpressionClass::BOUND_FUNCTION: {
+		auto &comp = expr.Cast<BoundFunctionExpression>();
+		if (comp.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
 			break;
 		}
 
-		Expression *col_expr = nullptr;
-		Expression *const_expr = nullptr;
+		const Expression *col_expr = nullptr;
+		const Expression *const_expr = nullptr;
 
-		if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-		    comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-			col_expr = comp.left.get();
-			const_expr = comp.right.get();
-		} else if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
-		           comp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-			col_expr = comp.right.get();
-			const_expr = comp.left.get();
+		if (BoundComparisonExpression::Left(comp).GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		    BoundComparisonExpression::Right(comp).GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			col_expr = &BoundComparisonExpression::Left(comp);
+			const_expr = &BoundComparisonExpression::Right(comp);
+		} else if (BoundComparisonExpression::Left(comp).GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+		           BoundComparisonExpression::Right(comp).GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			col_expr = &BoundComparisonExpression::Right(comp);
+			const_expr = &BoundComparisonExpression::Left(comp);
 		} else {
 			break;
 		}
 
-		auto col_idx = get.GetColumnIds()[col_expr->Cast<BoundColumnRefExpression>().binding.column_index];
-		auto &col_name = get.GetColumnName(col_idx);
+		auto col_idx = get.GetColumnIds()[col_expr->Cast<BoundColumnRefExpression>().Binding().column_index];
+		auto &col_name = get.GetColumnName(col_idx).GetIdentifierName();
 
 		// Only extract filters on partition key columns.
 		if (part_keys.find(col_name) == part_keys.end()) {
@@ -477,7 +480,7 @@ static bool TryExtractPartitionFilter(const Expression &expr, const LogicalGet &
 		}
 
 		// NULL partition values cannot be used for partition pruning.
-		auto &val = const_expr->Cast<BoundConstantExpression>().value;
+		auto &val = const_expr->Cast<BoundConstantExpression>().GetValue();
 		if (val.IsNull()) {
 			break;
 		}
@@ -488,11 +491,11 @@ static bool TryExtractPartitionFilter(const Expression &expr, const LogicalGet &
 	case ExpressionClass::BOUND_CONJUNCTION: {
 		auto &conj = expr.Cast<BoundConjunctionExpression>();
 		// OR is handled by the outer TryExtractPartitionFilters.
-		if (conj.type != ExpressionType::CONJUNCTION_AND) {
+		if (conj.GetExpressionType() != ExpressionType::CONJUNCTION_AND) {
 			break;
 		}
 		bool matched = false;
-		for (auto &child : conj.children) {
+		for (auto &child : conj.GetChildren()) {
 			// An AND branch may mix partition and non-partition predicates.
 			// Keep any partition constraints we can extract and leave the
 			// original expression for DuckDB to re-check.
@@ -512,7 +515,7 @@ static vector<map<string, string>> TryExtractPartitionFilters(const Expression &
                                                               const unordered_set<string> &part_keys) {
 	switch (filter.GetExpressionClass()) {
 	// Single comparison: extract as one partition filter.
-	case ExpressionClass::BOUND_COMPARISON: {
+	case ExpressionClass::BOUND_FUNCTION: {
 		map<string, string> part_filter;
 		if (TryExtractPartitionFilter(filter, get, part_keys, part_filter)) {
 			return {std::move(part_filter)};
@@ -523,14 +526,14 @@ static vector<map<string, string>> TryExtractPartitionFilters(const Expression &
 	// OR: each disjunct becomes a separate filter; bail out if any fails.
 	case ExpressionClass::BOUND_CONJUNCTION: {
 		auto &conj = filter.Cast<BoundConjunctionExpression>();
-		if (conj.type == ExpressionType::CONJUNCTION_AND) {
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 			map<string, string> part_filter;
 			if (TryExtractPartitionFilter(filter, get, part_keys, part_filter)) {
 				return {std::move(part_filter)};
 			}
-		} else if (conj.type == ExpressionType::CONJUNCTION_OR) {
+		} else if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
 			vector<map<string, string>> filters;
-			for (auto &child : conj.children) {
+			for (auto &child : conj.GetChildren()) {
 				map<string, string> part_filter;
 				if (!TryExtractPartitionFilter(*child, get, part_keys, part_filter)) {
 					return {};
@@ -738,14 +741,17 @@ string PaimonFunctions::GetScanSchema(const FunctionData &data) {
 }
 
 static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<PaimonScanBindData>();
 
 	auto path = PaimonTablePath::Parse(input.inputs);
 	bind_data->path = path;
 	paimon::Identifier table_identifier(path.dbname, path.tablename);
 
-	unordered_map<string, Value> scan_options(input.named_parameters.begin(), input.named_parameters.end());
+	unordered_map<string, Value> scan_options;
+	for (auto &entry : input.named_parameters) {
+		scan_options[entry.first.GetIdentifierName()] = entry.second;
+	}
 	auto expected_splits = scan_options.find("debug_expected_splits");
 	if (expected_splits != scan_options.end()) {
 		auto expected_value = expected_splits->second.GetValue<int64_t>();
@@ -858,7 +864,7 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	ArrowTableSchema arrow_table;
 	ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table, *arrow_schema);
 
-	names = arrow_table.GetNames();
+	names = StringsToIdentifiers(arrow_table.GetNames());
 	return_types = arrow_table.GetTypes();
 
 	bind_data->arrow_table = std::move(arrow_table);
@@ -1138,7 +1144,7 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 	local_state.chunk = current_chunk;
 
 	auto output_size = MinValue<idx_t>(STANDARD_VECTOR_SIZE, NumericCast<idx_t>(c_array->length));
-	output.SetCardinality(output_size);
+	output.SetChildCardinality(output_size);
 
 	auto &arrow_types = global_state.arrow_table.GetColumns();
 
@@ -1154,6 +1160,7 @@ static void PaimonScan(ClientContext &context, TableFunctionInput &input, DataCh
 		                                         current_chunk->arrow_array.offset, -1);
 		ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[col_idx], child_array, 0, array_state, output_size,
 		                                             arrow_type);
+		FlatVector::SetSize(output.data[col_idx], count_t(output_size));
 	}
 
 	output.Verify();
@@ -1176,12 +1183,14 @@ static InsertionOrderPreservingMap<string> PaimonScanToString(TableFunctionToStr
 static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 	auto fun = TableFunction("paimon_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
-	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
-	fun.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated: auto-detected from table schema
-	fun.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
-	fun.named_parameters["snapshot_from_timestamp"] = LogicalType::TIMESTAMP;
-	// Debug-only test hook, not part of the public paimon_scan API.
-	fun.named_parameters["debug_expected_splits"] = LogicalType::BIGINT;
+	fun.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated: auto-detected from table schema
+		options.Add("file_format", LogicalType::VARCHAR);     // deprecated: auto-detected from table schema
+		options.Add("snapshot_from_id", LogicalType::BIGINT);
+		options.Add("snapshot_from_timestamp", LogicalType::TIMESTAMP);
+		// Debug-only test hook, not part of the public paimon_scan API.
+		options.Add("debug_expected_splits", LogicalType::BIGINT);
+	});
 	fun.init_local = PaimonScanInitLocal;
 	fun.projection_pushdown = true;
 	fun.pushdown_complex_filter = PaimonPushdownFilter;
@@ -1190,7 +1199,6 @@ static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 	info.functions.AddFunction(fun);
 
 	FunctionDescription desc;
-	desc.parameter_types = fun.arguments;
 	desc.parameter_names = {"warehouse", "database", "table"};
 	desc.description = "Read a Paimon table, optionally at a historical snapshot using either snapshot_from_id or "
 	                   "snapshot_from_timestamp, but not both. manifest_format and file_format are deprecated; "
@@ -1203,12 +1211,14 @@ static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 static void AddPaimonScanFullPathFunction(CreateTableFunctionInfo &info) {
 	auto fun_fullpath =
 	    TableFunction("paimon_scan", {LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
-	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
-	fun_fullpath.named_parameters["file_format"] = LogicalType::VARCHAR;     // deprecated
-	fun_fullpath.named_parameters["snapshot_from_id"] = LogicalType::BIGINT;
-	fun_fullpath.named_parameters["snapshot_from_timestamp"] = LogicalType::TIMESTAMP;
-	// Debug-only test hook, not part of the public paimon_scan API.
-	fun_fullpath.named_parameters["debug_expected_splits"] = LogicalType::BIGINT;
+	fun_fullpath.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated
+		options.Add("file_format", LogicalType::VARCHAR);     // deprecated
+		options.Add("snapshot_from_id", LogicalType::BIGINT);
+		options.Add("snapshot_from_timestamp", LogicalType::TIMESTAMP);
+		// Debug-only test hook, not part of the public paimon_scan API.
+		options.Add("debug_expected_splits", LogicalType::BIGINT);
+	});
 	fun_fullpath.init_local = PaimonScanInitLocal;
 	fun_fullpath.projection_pushdown = true;
 	fun_fullpath.pushdown_complex_filter = PaimonPushdownFilter;
@@ -1217,7 +1227,6 @@ static void AddPaimonScanFullPathFunction(CreateTableFunctionInfo &info) {
 	info.functions.AddFunction(fun_fullpath);
 
 	FunctionDescription desc_fullpath;
-	desc_fullpath.parameter_types = fun_fullpath.arguments;
 	desc_fullpath.parameter_names = {"table_path"};
 	desc_fullpath.description =
 	    "Read a Paimon table, optionally at a historical snapshot using either snapshot_from_id or "

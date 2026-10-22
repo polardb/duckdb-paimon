@@ -49,7 +49,7 @@ void PaimonSchemaSet::LoadEntries(ClientContext &context) {
 
 	for (auto &database : databases) {
 		CreateSchemaInfo info;
-		info.schema = database;
+		info.SetSchema(Identifier(database));
 		auto schema_entry = make_uniq<PaimonSchemaEntry>(catalog, info);
 		entries.emplace(make_pair(database, std::move(schema_entry)));
 	}
@@ -81,7 +81,7 @@ optional_ptr<CatalogEntry> PaimonSchemaSet::GetEntry(ClientContext &context, con
 optional_ptr<CatalogEntry> PaimonSchemaSet::CreateEntry(const string &name) {
 	lock_guard<mutex> l(entry_lock);
 	CreateSchemaInfo info;
-	info.schema = name;
+	info.SetSchema(Identifier(name));
 	auto schema_entry = make_uniq<PaimonSchemaEntry>(catalog, info);
 	auto result = entries.emplace(make_pair(name, std::move(schema_entry)));
 	return result.first->second.get();

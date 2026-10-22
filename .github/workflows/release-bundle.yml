@@ -1,7 +1,7 @@
 name: Release Paimon Extension Bundle
 
 env:
-  duckdb_version: v1.5.5
+  duckdb_version: v2.0.0
 
 on:
   push:
@@ -64,8 +64,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch 2025.12.12 https://github.com/microsoft/vcpkg.git vcpkg
-          git -C vcpkg rev-parse HEAD | grep -qx 84bab45d415d22042bd0b9081aea57f362da3f35
+          git clone --depth 1 --branch 2026.06.24 https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg rev-parse HEAD | grep -qx cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
           ./vcpkg/bootstrap-vcpkg.sh
 
       - name: Build extension (release, Linux)
@@ -102,8 +102,8 @@ jobs:
               git config --global --add safe.directory \"${WORKSPACE}/duckdb\"
               git config --global --add safe.directory \"${WORKSPACE}/extension-ci-tools\"
               git config --global --add safe.directory \"${WORKSPACE}/third_party/paimon-cpp\"
-              git clone --depth 1 --branch 2025.12.12 https://github.com/microsoft/vcpkg.git \"${WORKSPACE}/vcpkg\"
-              git -C \"${WORKSPACE}/vcpkg\" rev-parse HEAD | grep -qx 84bab45d415d22042bd0b9081aea57f362da3f35
+              git clone --depth 1 --branch 2026.06.24 https://github.com/microsoft/vcpkg.git \"${WORKSPACE}/vcpkg\"
+              git -C \"${WORKSPACE}/vcpkg\" rev-parse HEAD | grep -qx cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
               \"${WORKSPACE}/vcpkg/bootstrap-vcpkg.sh\"
               VCPKG_TOOLCHAIN_PATH=\"${WORKSPACE}/vcpkg/scripts/buildsystems/vcpkg.cmake\" \
                 VCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \

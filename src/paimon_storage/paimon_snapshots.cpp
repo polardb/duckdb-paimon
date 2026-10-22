@@ -47,12 +47,13 @@ struct PaimonSnapshotsGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> PaimonSnapshotsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<PaimonSnapshotsBindData>();
 
 	bind_data->path = PaimonTablePath::Parse(input.inputs);
-	bind_data->input_options =
-	    unordered_map<string, Value>(input.named_parameters.begin(), input.named_parameters.end());
+	for (auto &entry : input.named_parameters) {
+		bind_data->input_options[entry.first.GetIdentifierName()] = entry.second;
+	}
 
 	names = {"snapshot_id", "schema_id",          "commit_user",        "commit_kind",
 	         "commit_time", "total_record_count", "delta_record_count", "watermark"};
@@ -87,35 +88,36 @@ static void PaimonSnapshotsExecute(ClientContext &context, TableFunctionInput &i
 	while (state.current_row < state.snapshots.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &snap = state.snapshots[state.current_row];
 
-		output.SetValue(0, count, Value::BIGINT(snap.snapshot_id));
-		output.SetValue(1, count, Value::BIGINT(snap.schema_id));
-		output.SetValue(2, count, Value(snap.commit_user));
-		output.SetValue(3, count, Value(paimon::SnapshotInfo::CommitKindToString(snap.commit_kind)));
+		output.data[0].Append(Value::BIGINT(snap.snapshot_id));
+		output.data[1].Append(Value::BIGINT(snap.schema_id));
+		output.data[2].Append(Value(snap.commit_user));
+		output.data[3].Append(Value(paimon::SnapshotInfo::CommitKindToString(snap.commit_kind)));
 
 		// timeMillis is epoch ms; DuckDB timestamp_t is epoch us
 		timestamp_t ts;
 		ts.value = snap.time_millis * 1000;
-		output.SetValue(4, count, Value::TIMESTAMP(ts));
+		output.data[4].Append(Value::TIMESTAMP(ts));
 
-		output.SetValue(5, count, snap.total_record_count ? Value::BIGINT(snap.total_record_count.value()) : Value());
-		output.SetValue(6, count, snap.delta_record_count ? Value::BIGINT(snap.delta_record_count.value()) : Value());
-		output.SetValue(7, count, snap.watermark ? Value::BIGINT(snap.watermark.value()) : Value());
+		output.data[5].Append(snap.total_record_count ? Value::BIGINT(snap.total_record_count.value()) : Value());
+		output.data[6].Append(snap.delta_record_count ? Value::BIGINT(snap.delta_record_count.value()) : Value());
+		output.data[7].Append(snap.watermark ? Value::BIGINT(snap.watermark.value()) : Value());
 
 		state.current_row++;
 		count++;
 	}
 
-	output.SetCardinality(count);
+	output.CheckCardinality(count);
 }
 
 static void AddPaimonSnapshotsThreePartFunction(CreateTableFunctionInfo &info) {
 	auto fun = TableFunction("paimon_snapshots", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         PaimonSnapshotsExecute, PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
-	fun.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated: auto-detected from table schema
+	fun.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated: auto-detected from table schema
+	});
 	info.functions.AddFunction(fun);
 
 	FunctionDescription desc;
-	desc.parameter_types = fun.arguments;
 	desc.parameter_names = {"warehouse", "database", "table"};
 	desc.description = "List a Paimon table's snapshots, including snapshot IDs, commit times and record counts. "
 	                   "manifest_format is deprecated; the format is detected from the table schema.";
@@ -127,11 +129,12 @@ static void AddPaimonSnapshotsThreePartFunction(CreateTableFunctionInfo &info) {
 static void AddPaimonSnapshotsFullPathFunction(CreateTableFunctionInfo &info) {
 	auto fun_fullpath = TableFunction("paimon_snapshots", {LogicalType::VARCHAR}, PaimonSnapshotsExecute,
 	                                  PaimonSnapshotsBind, PaimonSnapshotsInitGlobal);
-	fun_fullpath.named_parameters["manifest_format"] = LogicalType::VARCHAR; // deprecated
+	fun_fullpath.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated
+	});
 	info.functions.AddFunction(fun_fullpath);
 
 	FunctionDescription desc_fullpath;
-	desc_fullpath.parameter_types = fun_fullpath.arguments;
 	desc_fullpath.parameter_names = {"table_path"};
 	desc_fullpath.description =
 	    "List a Paimon table's snapshots, including snapshot IDs, commit times and record counts. "
