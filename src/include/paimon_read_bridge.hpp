@@ -46,8 +46,8 @@ inline const PaimonReadBridgeV1 *TryGetPaimonReadBridge(const BaseTableFunction 
 	return &api;
 }
 
-inline const PaimonReadBridgeV2 *TryGetPaimonNativeReadBridge(const TableFunction &candidate,
-                                                              const TableFunction &trusted) {
+inline const PaimonReadBridgeV2 *TryGetPaimonNativeReadBridge(const BaseTableFunction &candidate,
+                                                              const BaseTableFunction &trusted) {
 	auto *prefix = TryGetPaimonReadBridge(candidate, trusted);
 	if (!prefix || prefix->version != PAIMON_READ_BRIDGE_NATIVE_VERSION) {
 		return nullptr;
