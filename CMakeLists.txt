@@ -36,7 +36,7 @@ foreach(patch IN LISTS PAIMON_CPP_PATCHES)
   string(
     APPEND
     PAIMON_CPP_PATCH_SCRIPT
-    "git -C ${PAIMON_CPP_SOURCE_DIR} apply --reverse --check ${patch} 2>/dev/null || git -C ${PAIMON_CPP_SOURCE_DIR} apply ${patch} && "
+    "if git -C \"${PAIMON_CPP_SOURCE_DIR}\" apply --reverse --check \"${patch}\" 2>/dev/null; then :; else git -C \"${PAIMON_CPP_SOURCE_DIR}\" apply \"${patch}\" || exit 1; fi; "
   )
 endforeach()
 string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")
