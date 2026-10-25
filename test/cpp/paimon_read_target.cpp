@@ -204,6 +204,12 @@ TEST_CASE("Paimon read target: blank values normalize to bare main", "[paimon][r
 			CheckBranch(paimon::Identifier("db", "t$branch_" + blank), {{"branch", "dev"}}, {}, "main", {"t"});
 		}
 	}
+	for (const std::string invalid : {"t$branch_", "$branch_ ", "t$branch_ $snapshots", "t$$branch_ "}) {
+		CAPTURE(invalid);
+		SpyCatalog catalog;
+		REQUIRE_FALSE(PaimonReadTarget::Load(catalog, paimon::Identifier("db", invalid), {}).ok());
+		REQUIRE(catalog.loads.empty());
+	}
 }
 
 TEST_CASE("Paimon read target: nonblank branch bytes are preserved", "[paimon][read_target]") {

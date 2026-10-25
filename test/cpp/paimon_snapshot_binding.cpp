@@ -396,20 +396,29 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: missing branch and fallback", 
 	CAPTURE(static_cast<int>(entry), warehouse);
 	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
 	CopyBranch(warehouse + "/race.db/t");
-	// The filesystem catalog currently loads main's schema for a missing branch;
-	// the branch-aware native scanner then rejects it. This must not become
-	// an empty/main read, regardless of the scan entrypoint.
-	const auto missing = Catch::Contains("not found latest schema");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_missing"), missing);
+	// A missing branch may fail at native schema lookup or attached catalog
+	// lookup. Both must reject the bind rather than return an empty/main read.
+	auto missing = [&](const string &table) {
+		try {
+			Bind(reader, warehouse, entry, table);
+			FAIL("Missing branch unexpectedly produced a binding");
+		} catch (const IOException &error) {
+			REQUIRE(string(error.what()).find("Not exist:") != string::npos);
+		} catch (const CatalogException &error) {
+			REQUIRE(entry == Entry::CATALOG);
+			REQUIRE(string(error.what()).find("does not exist") != string::npos);
+		}
+	};
+	missing("t$branch_missing");
 	// Nonempty names are not trimmed to an existing branch.
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_ dev "), missing);
+	missing("t$branch_ dev ");
 	SetSchemaOption(warehouse + "/race.db/t/schema/schema-0", "branch", " dev ");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t"), missing);
+	missing("t");
 	auto main = Bind(reader, warehouse, entry, "t$branch_main");
 	REQUIRE(Count(reader, main) == 1);
 	ExpectRows(Read(reader, main), {{Value(1), Value(10)}});
 	SQL(writer, "CREATE TABLE pm.race.missing_option (id INTEGER) WITH ('branch'='missing')");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_option"), missing);
+	missing("missing_option");
 	SQL(writer, "CREATE TABLE pm.race.fallback (id INTEGER) WITH ('scan.fallback-branch'='main')");
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "fallback"),
 	                    Catch::Contains("does not support a non-empty scan.fallback-branch"));
@@ -522,8 +531,36 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: pk_index", "[paimon][snapshot_
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	CAPTURE(static_cast<int>(entry), warehouse);
 	const auto path = warehouse + "/race.db/pk_index";
-	std::filesystem::copy(native_fixtures + "/parquet/pk_btree_e2e.db/pk_btree_e2e", path,
+	std::filesystem::copy(native_fixtures + "/orc/pk_btree_e2e.db/pk_btree_e2e", path,
 	                      std::filesystem::copy_options::recursive);
+	// The upgraded SDK retains the same five-snapshot BTree oracle in ORC.
+	// Keep the independent expected rows below, including later deletes/updates.
+	{
+		using namespace duckdb_yyjson;
+		std::ifstream stream(path + "/schema/schema-0");
+		REQUIRE(stream.good());
+		string json((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+		std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(yyjson_read(json.data(), json.size(), 0),
+		                                                            yyjson_doc_free);
+		REQUIRE(doc);
+		auto root = yyjson_doc_get_root(doc.get());
+		auto keys = yyjson_obj_get(root, "primaryKeys");
+		REQUIRE(yyjson_arr_size(keys) == 1);
+		auto key = yyjson_get_str(yyjson_arr_get(keys, 0));
+		REQUIRE(key);
+		REQUIRE(string(key) == "id");
+		auto options = yyjson_obj_get(root, "options");
+		auto format = yyjson_get_str(yyjson_obj_get(options, "file.format"));
+		auto index = yyjson_get_str(yyjson_obj_get(options, "pk-btree.index.columns"));
+		REQUIRE(format);
+		REQUIRE(index);
+		REQUIRE(string(format) == "orc");
+		REQUIRE(string(index) == "score");
+	}
+	REQUIRE_FALSE(std::filesystem::is_empty(path + "/index"));
+	for (int id = 1; id <= 5; id++) {
+		REQUIRE(std::filesystem::is_regular_file(path + "/snapshot/snapshot-" + std::to_string(id)));
+	}
 	std::filesystem::rename(path + "/snapshot/LATEST", warehouse + "/staged-latest");
 	for (int id = 3; id <= 5; id++) {
 		std::filesystem::rename(path + "/snapshot/snapshot-" + std::to_string(id),

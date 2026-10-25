@@ -61,21 +61,33 @@ struct PaimonReadTarget {
 	// selected branch's schema must not redirect the read to another branch.
 	static paimon::Result<PaimonReadTarget> Load(paimon::Catalog &catalog, const paimon::Identifier &identifier,
 	                                             const std::map<std::string, std::string> &overrides) {
-		auto name = identifier.GetDataTableName();
+		// The native parser now rejects a whitespace-only explicit branch. Keep
+		// the existing main-branch spelling without accepting an empty suffix,
+		// another '$' component, or trimming a nonblank branch name.
+		std::optional<paimon::Identifier> normalized;
+		const auto &object = identifier.GetObjectName();
+		const std::string prefix = "$branch_";
+		const auto separator = object.find('$');
+		if (separator != std::string::npos && separator > 0 && object.compare(separator, prefix.size(), prefix) == 0 &&
+		    object.size() > separator + prefix.size() && IsBlank(object.substr(separator + prefix.size()))) {
+			normalized.emplace(identifier.GetDatabaseName(), object.substr(0, separator) + "$branch_main");
+		}
+		const auto &request = normalized ? *normalized : identifier;
+		auto name = request.GetDataTableName();
 		if (!name.ok()) {
 			return name.status();
 		}
-		auto explicit_branch = identifier.GetBranchName();
+		auto explicit_branch = request.GetBranchName();
 		if (!explicit_branch.ok()) {
 			return explicit_branch.status();
 		}
-		auto system = identifier.IsSystemTable();
+		auto system = request.IsSystemTable();
 		if (!system.ok()) {
 			return system.status();
 		}
-		paimon::Identifier base(identifier.GetDatabaseName(), name.value());
+		paimon::Identifier base(request.GetDatabaseName(), name.value());
 		auto branch = NormalizeBranch(explicit_branch.value().value_or(paimon::Identifier::kDefaultMainBranch));
-		auto lookup = system.value() ? identifier : SchemaIdentifier(base, branch);
+		auto lookup = system.value() ? request : SchemaIdentifier(base, branch);
 		auto schema = catalog.LoadTableSchema(lookup);
 		if (!schema.ok()) {
 			return schema.status();
@@ -97,7 +109,7 @@ struct PaimonReadTarget {
 				}
 			}
 		}
-		auto resolved_identifier = system.value() ? identifier : SchemaIdentifier(base, branch);
+		auto resolved_identifier = system.value() ? request : SchemaIdentifier(base, branch);
 		return PaimonReadTarget {std::move(base), std::move(resolved_identifier), std::move(branch),
 		                         std::move(schema).value()};
 	}
