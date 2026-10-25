@@ -907,3 +907,164 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: validates handle outputs 
 	REQUIRE_FALSE(raw);
 	REQUIRE(count == 0);
 }
+
+struct AvroFixtureHeader {
+	string schema;
+	string sync;
+	int64_t records;
+};
+
+static int64_t FixtureAvroLong(const string &bytes, size_t &offset) {
+	uint64_t value = 0;
+	for (unsigned shift = 0; shift < 64; shift += 7) {
+		REQUIRE(offset < bytes.size());
+		auto byte = static_cast<uint8_t>(bytes[offset++]);
+		value |= uint64_t(byte & 127) << shift;
+		if (!(byte & 128)) {
+			return static_cast<int64_t>(value >> 1) ^ -static_cast<int64_t>(value & 1);
+		}
+	}
+	FAIL("Invalid fixture Avro integer");
+	return 0;
+}
+
+static string FixtureAvroBytes(const string &bytes, size_t &offset) {
+	auto length = FixtureAvroLong(bytes, offset);
+	REQUIRE(length >= 0);
+	REQUIRE(uint64_t(length) <= bytes.size() - offset);
+	auto result = bytes.substr(offset, length);
+	offset += length;
+	return result;
+}
+
+static AvroFixtureHeader ReadAvroFixtureHeader(const string &bytes) {
+	REQUIRE(bytes.substr(0, 4) == string("Obj\1", 4));
+	size_t offset = 4;
+	AvroFixtureHeader result;
+	for (;;) {
+		auto count = FixtureAvroLong(bytes, offset);
+		if (!count) {
+			break;
+		}
+		if (count < 0) {
+			count = -count;
+			FixtureAvroLong(bytes, offset);
+		}
+		for (int64_t i = 0; i < count; i++) {
+			auto key = FixtureAvroBytes(bytes, offset);
+			auto value = FixtureAvroBytes(bytes, offset);
+			if (key == "avro.schema") {
+				result.schema = value;
+			}
+		}
+	}
+	REQUIRE_FALSE(result.schema.empty());
+	REQUIRE(offset + 16 < bytes.size());
+	result.sync = bytes.substr(offset, 16);
+	offset += 16;
+	result.records = FixtureAvroLong(bytes, offset);
+	return result;
+}
+
+static void WriteFixtureAvroLong(string &bytes, int64_t value) {
+	uint64_t encoded = (uint64_t(value) << 1) ^ uint64_t(value >> 63);
+	while (encoded > 127) {
+		bytes.push_back(char((encoded & 127) | 128));
+		encoded >>= 7;
+	}
+	bytes.push_back(char(encoded));
+}
+
+static string EmptyManifestOcf(const AvroFixtureHeader &header, const string &codec, const string &payload,
+                               int64_t records) {
+	string result("Obj\1", 4);
+	WriteFixtureAvroLong(result, 2);
+	for (auto &item : std::map<string, string> {{"avro.schema", header.schema}, {"avro.codec", codec}}) {
+		WriteFixtureAvroLong(result, item.first.size());
+		result += item.first;
+		WriteFixtureAvroLong(result, item.second.size());
+		result += item.second;
+	}
+	WriteFixtureAvroLong(result, 0);
+	result += header.sync;
+	WriteFixtureAvroLong(result, records);
+	WriteFixtureAvroLong(result, payload.size());
+	result += payload;
+	result += header.sync;
+	return result;
+}
+
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: zero-record Avro blocks retain framing and payload checks",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	auto variant = GENERATE("null-empty", "zstd-empty", "negative-count", "null-payload", "zstd-payload", "bad-sync",
+	                        "truncated-sync", "empty-zstd", "malformed-zstd");
+	INFO(variant);
+	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
+	auto bound = Bind();
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	std::filesystem::path empty_manifest;
+	AvroFixtureHeader header;
+	for (auto &file : std::filesystem::directory_iterator(warehouse + "/race.db/t/manifest")) {
+		if (file.path().filename().string().find("manifest-list-") != 0) {
+			continue;
+		}
+		std::ifstream stream(file.path(), std::ios::binary);
+		string bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+		auto candidate = ReadAvroFixtureHeader(bytes);
+		if (candidate.records == 0) {
+			empty_manifest = file.path();
+			header = candidate;
+			break;
+		}
+	}
+	REQUIRE_FALSE(empty_manifest.empty());
+	string kind(variant);
+	bool zstd = kind == "zstd-empty" || kind == "zstd-payload" || kind == "empty-zstd" || kind == "malformed-zstd";
+	// Valid single-segment Zstandard frames with raw last blocks, decoded size 0/1.
+	string payload = zstd ? string("\x28\xb5\x2f\xfd\x20\x00\x01\x00\x00", 9) : string();
+	if (kind == "zstd-payload") {
+		payload = string("\x28\xb5\x2f\xfd\x20\x01\x09\x00\x00x", 10);
+	}
+	if (kind == "null-payload") {
+		payload = "x";
+	}
+	if (kind == "empty-zstd") {
+		payload.clear();
+	}
+	if (kind == "malformed-zstd") {
+		payload = "broken";
+	}
+	auto bytes = EmptyManifestOcf(header, zstd ? "zstandard" : "null", payload, kind == "negative-count" ? -1 : 0);
+	if (kind == "bad-sync") {
+		bytes.back() ^= 1;
+	}
+	if (kind == "truncated-sync") {
+		bytes.pop_back();
+	}
+	{
+		std::ofstream stream(empty_manifest, std::ios::binary | std::ios::trunc);
+		stream.write(bytes.data(), bytes.size());
+		REQUIRE(stream.good());
+	}
+	PaimonPlanOptionsV1 options {sizeof(options), 64 * 1024 * 1024};
+	void *raw = nullptr;
+	uint64_t count = 99;
+	auto status = api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, nullptr, 0);
+	NativeHandle plan(raw, api.release_plan);
+#if defined(__linux__) && defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI && _GLIBCXX_RELEASE >= 9
+	if (kind == "null-empty" || kind == "zstd-empty") {
+		REQUIRE(status == PAIMON_READ_OK);
+		REQUIRE(count > 0);
+	} else {
+		REQUIRE(status == PAIMON_READ_INTERNAL_ERROR);
+		REQUIRE_FALSE(plan);
+		REQUIRE(count == 0);
+	}
+#else
+	REQUIRE(status == PAIMON_READ_UNSUPPORTED);
+	REQUIRE_FALSE(plan);
+	REQUIRE(count == 0);
+#endif
+}

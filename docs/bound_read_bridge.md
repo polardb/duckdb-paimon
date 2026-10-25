@@ -232,3 +232,14 @@ lifetimes. This bounded fixture coverage does not establish general nested/null
 or primary-key semantics, arbitrary allocation-failure cleanup, native
 zero-row-batch progression, whole-program sanitization, Paimon GPU execution,
 or exact Sirius-host compatibility. Those require separate qualification.
+
+
+The native dependency also applies a narrow `bounded-empty-avro-block` patch:
+current native writers emit zero-record Avro OCF blocks for empty manifest
+lists. These still undergo length, schema, sync and full codec/payload validation;
+negative counts, nonempty decoded payload for zero records, malformed frames
+and bad/truncated markers remain errors. Real writer fixtures and explicit null
+and Zstandard blocks exercise this through the bridge. The native SDK now uses
+`Identifier::GetObjectName`; the deprecated `manifest.format` read option retains
+its string key. The context-aware Arrow header installation patch targets this
+new SDK, and its Zstandard archive is linked explicitly before Arrow bundles.
