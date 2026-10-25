@@ -10,6 +10,7 @@
 # limitations under the License.
 
 """Exercise the actual CMake patch command on pinned, offline Git fixtures."""
+
 import argparse
 import pathlib
 import re
@@ -30,7 +31,7 @@ def main():
     root = args.source_root.resolve()
     native = root / "third_party/paimon-cpp"
     text = (root / "CMakeLists.txt").read_text()
-    recipe = text[text.index("set(PAIMON_CPP_PATCHES"):text.index("set(PAIMON_CPP_TOOLCHAIN_ARGS)")]
+    recipe = text[text.index("set(PAIMON_CPP_PATCHES") : text.index("set(PAIMON_CPP_TOOLCHAIN_ARGS)")]
     names = re.findall(r"\$\{CMAKE_CURRENT_SOURCE_DIR\}/(patches/[^\s)]+)", recipe)
     assert len(names) >= 2, "Expected the native installation and planner patches"
     files = set()
@@ -60,8 +61,13 @@ def main():
             script = work / "command.cmake"
             script.write_text(
                 'set(CMAKE_CURRENT_SOURCE_DIR "' + project.as_posix() + '")\n'
-                'set(PAIMON_CPP_SOURCE_DIR "' + checkout.as_posix() + '")\n'
-                + recipe + '\nfile(WRITE "' + command.as_posix() + '" "${PAIMON_CPP_PATCH_SCRIPT}")\n'
+                'set(PAIMON_CPP_SOURCE_DIR "'
+                + checkout.as_posix()
+                + '")\n'
+                + recipe
+                + '\nfile(WRITE "'
+                + command.as_posix()
+                + '" "${PAIMON_CPP_PATCH_SCRIPT}")\n'
             )
             result = run([args.cmake, "-P", str(script)])
             assert result.returncode == 0, result.stderr

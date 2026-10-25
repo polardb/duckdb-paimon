@@ -40,7 +40,6 @@ using namespace duckdb;
 #define PAIMON_TEST_FINITE_PLANNING 0
 #endif
 
-
 static_assert(std::is_standard_layout<PaimonReadBridgeV1>::value, "Bridge must have C layout");
 static_assert(std::is_standard_layout<PaimonBoundReadViewV1>::value, "Views must have C layout");
 
