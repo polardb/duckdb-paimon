@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 def run(args, cwd=None):
@@ -35,6 +36,10 @@ def main():
     names = re.findall(r"\$\{CMAKE_CURRENT_SOURCE_DIR\}/(patches/[^\s)]+)", recipe)
     assert len(names) >= 2, "Expected the native installation and planner patches"
     patch_command = re.search(r"^  PATCH_COMMAND (.+)$", text, re.MULTILINE).group(1)
+    patch_dependencies = re.search(
+        r"ExternalProject_Add_StepDependencies\(paimon_cpp_ep patch\s+[^)]+\)", text
+    )
+    assert patch_dependencies, "Missing native patch script dependency"
     files = set()
     for name in names:
         files.update(re.findall(r"^--- a/(.+)$", (root / name).read_text(), re.MULTILINE))
@@ -59,7 +64,8 @@ def main():
                 if index == broken:
                     target.write_text("deliberately invalid native patch\n")
             build = work / "build"
-            (project / "CMakeLists.txt").write_text(
+            project_file = project / "CMakeLists.txt"
+            project_file.write_text(
                 'cmake_minimum_required(VERSION 3.20)\nproject(patch_control NONE)\ninclude(ExternalProject)\n'
                 'set(PAIMON_CPP_SOURCE_DIR "'
                 + checkout.as_posix()
@@ -70,6 +76,8 @@ def main():
                 'DOWNLOAD_COMMAND "" UPDATE_COMMAND ""\nPATCH_COMMAND '
                 + patch_command
                 + '\nCONFIGURE_COMMAND "" BUILD_COMMAND "" INSTALL_COMMAND "")\n'
+                + patch_dependencies.group(0).replace("paimon_cpp_ep", "native_patch")
+                + "\n"
             )
             generator = "Ninja" if shutil.which("ninja") else "Unix Makefiles"
             result = run([args.cmake, "-S", str(project), "-B", str(build), "-G", generator])
@@ -85,9 +93,36 @@ def main():
                 applied = run(["git", "apply", "--reverse", "--check", str(root / name)], cwd=checkout)
                 assert (applied.returncode == 0) == (broken is None or index < broken), (broken, name)
             if broken is None:
-                result = run(["sh", (build / "patch-path").read_text()])
+                script = pathlib.Path((build / "patch-path").read_text())
+                stamp = build / "native_patch-prefix/src/native_patch-stamp/native_patch-patch"
+                previous = (script.stat().st_mtime_ns, stamp.stat().st_mtime_ns)
+                result = run([args.cmake, "-S", str(project), "-B", str(build)])
                 assert result.returncode == 0, result.stderr
-            print("PASS", "apply and idempotence" if broken is None else "failure at patch " + str(broken))
+                result = run([args.cmake, "--build", str(build)])
+                assert result.returncode == 0, result.stderr
+                assert previous == (script.stat().st_mtime_ns, stamp.stat().st_mtime_ns), (
+                    "Unchanged configuration reran native patches"
+                )
+                original = project_file.read_text()
+                changed = original.replace(
+                    'string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")',
+                    'string(APPEND PAIMON_CPP_PATCH_SCRIPT "exit 29")',
+                )
+                assert changed != original, "Missing incremental patch recipe control"
+                # Makefile generators can compare timestamps at second resolution.
+                time.sleep(1.1)
+                project_file.write_text(changed)
+                result = run([args.cmake, "-S", str(project), "-B", str(build)])
+                assert result.returncode == 0, result.stderr
+                result = run([args.cmake, "--build", str(build)])
+                assert result.returncode != 0, "Changed patch recipe was skipped by ExternalProject"
+                time.sleep(1.1)
+                project_file.write_text(original)
+                result = run([args.cmake, "-S", str(project), "-B", str(build)])
+                assert result.returncode == 0, result.stderr
+                result = run([args.cmake, "--build", str(build)])
+                assert result.returncode == 0, result.stderr
+            print("PASS", "apply, incremental failure and replay" if broken is None else "failure at patch " + str(broken))
 
 
 if __name__ == "__main__":

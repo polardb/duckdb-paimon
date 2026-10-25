@@ -42,7 +42,8 @@ foreach(patch IN LISTS PAIMON_CPP_PATCHES)
 endforeach()
 string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")
 set(PAIMON_CPP_PATCH_FILE "${CMAKE_CURRENT_BINARY_DIR}/apply-paimon-patches.sh")
-file(WRITE "${PAIMON_CPP_PATCH_FILE}" "${PAIMON_CPP_PATCH_SCRIPT}")
+file(GENERATE OUTPUT "${PAIMON_CPP_PATCH_FILE}"
+     CONTENT "${PAIMON_CPP_PATCH_SCRIPT}")
 
 set(PAIMON_CPP_TOOLCHAIN_ARGS)
 set(PAIMON_CPP_SYSTEM_LIBS)
@@ -146,6 +147,9 @@ ExternalProject_Add(
     $<$<BOOL:${PAIMON_ENABLE_OSS}>:${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_STATIC_LIBRARY_SUFFIX}>
     $<$<BOOL:${PAIMON_ENABLE_S3}>:${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_STATIC_LIBRARY_SUFFIX}>
     ${PAIMON_CPP_STATIC_DEPENDENCY_LIBS})
+
+ExternalProject_Add_StepDependencies(paimon_cpp_ep patch
+                                     "${PAIMON_CPP_PATCH_FILE}")
 
 # Extension sources
 set(EXTENSION_SOURCES
