@@ -716,7 +716,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: exhausted budgets publish
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: finite planning refuses unsupported profile without fallback",
                  "[paimon][bound_read_bridge][native_read_bridge]") {
-	SQL(*writer, "CREATE TABLE pm.race.bucketed (id INTEGER, value INTEGER) WITH ('bucket'='1')");
+	SQL(*writer, "CREATE TABLE pm.race.bucketed (id INTEGER, value INTEGER) WITH ('bucket'='1', 'bucket-key'='id')");
 	SQL(*writer, "INSERT INTO pm.race.bucketed VALUES (1, 7)");
 	auto bound = Bind(0, "bucketed");
 	auto &api = NativeAPI(*this, bound);
@@ -900,7 +900,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: validates handle outputs 
 	REQUIRE_FALSE(schema);
 	auto table = GENERATE("pk", "evolved");
 	if (string(table) == "pk") {
-		SQL(*writer, "CREATE TABLE pm.race.pk (id INTEGER PRIMARY KEY) WITH ('bucket'='1')");
+		SQL(*writer, "CREATE TABLE pm.race.pk (id INTEGER PRIMARY KEY) WITH ('bucket'='1', 'bucket-key'='id')");
 	} else {
 		SQL(*writer, "CREATE TABLE pm.race.evolved (id INTEGER) WITH ('data-evolution.enabled'='true', "
 		             "'row-tracking.enabled'='true')");
