@@ -32,6 +32,9 @@ jobs:
           ninja --version | tee -a bridge-toolchain.log
           "$CC" --version | tee -a bridge-toolchain.log
           "$CXX" --version | tee -a bridge-toolchain.log
+      - name: Reject native patch failures before building
+        shell: bash
+        run: python3 test/check_native_patches.py --source-root "$PWD" --cmake "$(command -v cmake)"
       - name: Configure isolated dynamic-only host
         shell: bash
         run: |
