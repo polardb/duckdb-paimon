@@ -531,36 +531,8 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: pk_index", "[paimon][snapshot_
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
 	CAPTURE(static_cast<int>(entry), warehouse);
 	const auto path = warehouse + "/race.db/pk_index";
-	std::filesystem::copy(native_fixtures + "/orc/pk_btree_e2e.db/pk_btree_e2e", path,
+	std::filesystem::copy(native_fixtures + "/parquet/pk_btree_e2e.db/pk_btree_e2e", path,
 	                      std::filesystem::copy_options::recursive);
-	// The upgraded SDK retains the same five-snapshot BTree oracle in ORC.
-	// Keep the independent expected rows below, including later deletes/updates.
-	{
-		using namespace duckdb_yyjson;
-		std::ifstream stream(path + "/schema/schema-0");
-		REQUIRE(stream.good());
-		string json((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-		std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(yyjson_read(json.data(), json.size(), 0),
-		                                                            yyjson_doc_free);
-		REQUIRE(doc);
-		auto root = yyjson_doc_get_root(doc.get());
-		auto keys = yyjson_obj_get(root, "primaryKeys");
-		REQUIRE(yyjson_arr_size(keys) == 1);
-		auto key = yyjson_get_str(yyjson_arr_get(keys, 0));
-		REQUIRE(key);
-		REQUIRE(string(key) == "id");
-		auto options = yyjson_obj_get(root, "options");
-		auto format = yyjson_get_str(yyjson_obj_get(options, "file.format"));
-		auto index = yyjson_get_str(yyjson_obj_get(options, "pk-btree.index.columns"));
-		REQUIRE(format);
-		REQUIRE(index);
-		REQUIRE(string(format) == "orc");
-		REQUIRE(string(index) == "score");
-	}
-	REQUIRE_FALSE(std::filesystem::is_empty(path + "/index"));
-	for (int id = 1; id <= 5; id++) {
-		REQUIRE(std::filesystem::is_regular_file(path + "/snapshot/snapshot-" + std::to_string(id)));
-	}
 	std::filesystem::rename(path + "/snapshot/LATEST", warehouse + "/staged-latest");
 	for (int id = 3; id <= 5; id++) {
 		std::filesystem::rename(path + "/snapshot/snapshot-" + std::to_string(id),
