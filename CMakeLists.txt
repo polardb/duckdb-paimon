@@ -27,7 +27,8 @@ set(PAIMON_CPP_LIB ${PAIMON_CPP_PREFIX}/lib64)
 file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 
 set(PAIMON_CPP_PATCHES
-    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch)
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-bounded-empty-avro-block.patch)
 
 # Build patch command: apply each patch idempotently
 set(PAIMON_CPP_PATCH_SCRIPT "")
@@ -63,6 +64,7 @@ if(CMAKE_TOOLCHAIN_FILE AND DEFINED VCPKG_TARGET_TRIPLET)
 endif()
 
 set(PAIMON_CPP_STATIC_DEPENDENCY_LIBS
+  ${PAIMON_CPP_BUILD_DIR}/zstd_ep-install/lib/libzstd${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/arrow_ep-install/lib/libarrow${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/arrow_ep-install/lib/libarrow_acero${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/arrow_ep-install/lib/libarrow_bundled_dependencies${CMAKE_STATIC_LIBRARY_SUFFIX}
