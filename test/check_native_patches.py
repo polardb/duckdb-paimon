@@ -36,9 +36,7 @@ def main():
     names = re.findall(r"\$\{CMAKE_CURRENT_SOURCE_DIR\}/(patches/[^\s)]+)", recipe)
     assert len(names) >= 2, "Expected the native installation and planner patches"
     patch_command = re.search(r"^  PATCH_COMMAND (.+)$", text, re.MULTILINE).group(1)
-    patch_dependencies = re.search(
-        r"ExternalProject_Add_StepDependencies\(paimon_cpp_ep patch\s+[^)]+\)", text
-    )
+    patch_dependencies = re.search(r"ExternalProject_Add_StepDependencies\(paimon_cpp_ep patch\s+[^)]+\)", text)
     assert patch_dependencies, "Missing native patch script dependency"
     files = set()
     for name in names:
@@ -100,9 +98,10 @@ def main():
                 assert result.returncode == 0, result.stderr
                 result = run([args.cmake, "--build", str(build)])
                 assert result.returncode == 0, result.stderr
-                assert previous == (script.stat().st_mtime_ns, stamp.stat().st_mtime_ns), (
-                    "Unchanged configuration reran native patches"
-                )
+                assert previous == (
+                    script.stat().st_mtime_ns,
+                    stamp.stat().st_mtime_ns,
+                ), "Unchanged configuration reran native patches"
                 original = project_file.read_text()
                 changed = original.replace(
                     'string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")',
@@ -122,7 +121,9 @@ def main():
                 assert result.returncode == 0, result.stderr
                 result = run([args.cmake, "--build", str(build)])
                 assert result.returncode == 0, result.stderr
-            print("PASS", "apply, incremental failure and replay" if broken is None else "failure at patch " + str(broken))
+            print(
+                "PASS", "apply, incremental failure and replay" if broken is None else "failure at patch " + str(broken)
+            )
 
 
 if __name__ == "__main__":
