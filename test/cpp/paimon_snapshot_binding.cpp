@@ -25,6 +25,7 @@
 #include "paimon_extension.hpp"
 #include "paimon_functions.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -402,11 +403,17 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: missing branch and fallback", 
 		try {
 			Bind(reader, warehouse, entry, table);
 			FAIL("Missing branch unexpectedly produced a binding");
-		} catch (const IOException &error) {
-			REQUIRE(string(error.what()).find("Not exist:") != string::npos);
-		} catch (const CatalogException &error) {
-			REQUIRE(entry == Entry::CATALOG);
-			REQUIRE(string(error.what()).find("does not exist") != string::npos);
+		} catch (const std::exception &exception) {
+			ErrorData error(exception);
+			if (error.Type() == ExceptionType::CATALOG) {
+				REQUIRE(entry == Entry::CATALOG);
+				auto subtype = error.ExtraInfo().find("error_subtype");
+				REQUIRE(subtype != error.ExtraInfo().end());
+				REQUIRE(subtype->second == "MISSING_ENTRY");
+			} else {
+				REQUIRE(error.Type() == ExceptionType::IO);
+				REQUIRE(error.RawMessage().find("Not exist:") != string::npos);
+			}
 		}
 	};
 	missing("t$branch_missing");
