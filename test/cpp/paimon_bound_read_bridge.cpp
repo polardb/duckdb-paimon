@@ -780,8 +780,14 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: missing retained snapshot
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and after native calls publishes nothing",
                  "[paimon][bound_read_bridge][native_read_bridge]") {
-	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
-	auto bound = Bind();
+#if defined(__linux__)
+	auto byte_limit = GENERATE(UINT64_MAX, uint64_t(64 * 1024 * 1024));
+#else
+	auto byte_limit = UINT64_MAX;
+#endif
+	SQL(*writer, "CREATE TABLE pm.race.cancelled (id INTEGER, value INTEGER) WITH ('bucket'='-1')");
+	SQL(*writer, "INSERT INTO pm.race.cancelled VALUES (1, 7)");
+	auto bound = Bind(0, "cancelled");
 	auto &api = NativeAPI(*this, bound);
 	Descriptor descriptor(api.descriptor);
 	Retain(bound, descriptor);
@@ -791,7 +797,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and a
 	SECTION("planning") {
 		uint64_t count = 99;
 		void *raw = nullptr;
-		PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+		PaimonPlanOptionsV1 options {sizeof(options), byte_limit};
 		REQUIRE(api.create_plan(descriptor.handle, &options, &cancel, &raw, &count, nullptr, 0) ==
 		        PAIMON_READ_CANCELLED);
 		REQUIRE_FALSE(raw);
@@ -799,7 +805,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and a
 	}
 	SECTION("reader creation") {
 		uint64_t count;
-		auto plan = Plan(api, descriptor, count);
+		auto plan = Plan(api, descriptor, count, byte_limit);
 		auto split = Split(api, plan, 0);
 		void *raw = nullptr;
 		REQUIRE(api.open_reader(split.get(), &cancel, &raw, nullptr, 0) == PAIMON_READ_CANCELLED);
@@ -807,7 +813,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and a
 	}
 	SECTION("batch creation, including successful native root discarded on cancellation") {
 		uint64_t count;
-		auto plan = Plan(api, descriptor, count);
+		auto plan = Plan(api, descriptor, count, byte_limit);
 		auto split = Split(api, plan, 0);
 		auto native_reader = Reader(api, split);
 		void *raw = nullptr;

@@ -119,7 +119,7 @@ public:
 	paimon::Result<bool> TableExists(const paimon::Identifier &) const override {
 		UnexpectedCall();
 	}
-	std::string GetDatabaseLocation(const std::string &) const override {
+	paimon::Result<std::string> GetDatabaseLocation(const std::string &) const override {
 		UnexpectedCall();
 	}
 	paimon::Result<std::string> GetTableLocation(const paimon::Identifier &) const override {
@@ -132,6 +132,10 @@ public:
 		UnexpectedCall();
 	}
 	const Options &GetOptions() const override {
+		UnexpectedCall();
+	}
+	paimon::Result<std::optional<paimon::SnapshotInfo>> GetLatestSnapshot(const paimon::Identifier &,
+	                                                                      const std::string &) const override {
 		UnexpectedCall();
 	}
 	paimon::Result<std::vector<paimon::SnapshotInfo>> ListSnapshots(const paimon::Identifier &,

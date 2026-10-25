@@ -2,8 +2,9 @@
 
 The V1 descriptor contract is the first step of the Sirius Paimon integration.
 The experimental V2 extension below adds native planning and batch reads, with
-whole-call cancellation checks. It supplies no bounded planning admission, GPU
-scan or CPU replay. DuckDB's existing CPU scan behavior is unchanged.
+whole-call cancellation checks and per-call bounded metadata planning on the
+native SDK's qualified profile. It supplies no query-wide memory quota, GPU scan
+or CPU replay. DuckDB's existing CPU scan behavior is unchanged.
 
 ## Discovery and Trust
 
@@ -210,9 +211,11 @@ keep their original options; these deliberate scheduling overrides do not
 change snapshot/schema/query semantics. There is no performance-parity claim.
 Accepted bridge-executor work completes inline,
 including nested submission, so no accepted jobs remain to drain on return.
-Pinned `ScanContextBuilder` construction/reset can still create transient
-four-thread default executors before/after applying that custom executor; this
-is not a claim of zero native threads. Other native formats, primary-key merge
+The pinned SDK's `ScanContextBuilder` and `ReadContextBuilder` reset their
+executor to null; `Finish` creates a default executor only if none was supplied.
+The bridge supplies its inline executor before `Finish` on both paths. This
+avoids those default planning/reader executors; it is not a claim of zero native
+threads. Other native formats, primary-key merge
 readers and data-evolution topology are outside the API's accepted scope.
 This bridge does not resize global pools, replace global executors or change
 Arrow global thread settings. It does not certify a bound on all process
