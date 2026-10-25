@@ -86,8 +86,11 @@ struct PaimonReadCancellationV1 {
 
 struct PaimonPlanOptionsV1 {
 	uint64_t struct_size;
-	/* Finite limits are refused BEFORE native planning. UINT64_MAX explicitly
-	 * opts into unbounded planning for qualification, not production admission. */
+	/* Per-create_plan cumulative metadata allocation admission through the native
+	 * bounded planner on its qualified profile. Context/descriptor construction,
+	 * reader buffers and process RSS are outside this limit. Frees do not replenish
+	 * admission; independent calls do not share a budget. UINT64_MAX explicitly
+	 * opts into experimental unbounded planning for qualification. */
 	uint64_t planning_byte_limit;
 };
 

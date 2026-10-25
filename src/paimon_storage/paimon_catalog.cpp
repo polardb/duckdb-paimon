@@ -157,7 +157,7 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 
 	auto manifest_fmt = TryGetPaimonOptionValue(input_options, "manifest_format");
 	if (manifest_fmt.has_value()) {
-		paimon_options[paimon::Options::MANIFEST_FORMAT] =
+		paimon_options["manifest.format"] =
 		    GetValidatedFormatOption(input_options, "manifest_format", "", supported_manifest_formats);
 	}
 

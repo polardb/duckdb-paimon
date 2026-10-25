@@ -115,7 +115,9 @@ or native-reader cancellation/ownership qualification.
 
 V2 is a partial implementation of [#139](https://github.com/polardb/duckdb-paimon/issues/139),
 layered on the retained descriptor contract from PR #135. It does **not** close
-#139 or qualify bounded production planning. No SDK or DuckDB pin changes.
+#139 or qualify unrestricted production/GPU use. The native SDK is pinned to
+`8f03510b661c2a2a590752b30292aa17376dbc23` (Apache Paimon C++ #462); the
+DuckDB pin remains unchanged.
 
 `TryGetPaimonNativeReadBridge` authenticates the same callback/singleton identity
 as descriptor discovery, then checks the V2 prefix and all native callbacks.
@@ -131,10 +133,13 @@ Call sequence:
 
 1. Retain a bound descriptor through either `paimon_scan` overload or attached
    scan. Retain still does no metadata I/O or planning.
-2. Set `PaimonPlanOptionsV1.struct_size` and request `create_plan`. **Every finite
-   `planning_byte_limit`, including zero, is refused before native planning.**
-   The pinned native API cannot bound its ordinary/transitive planning
-   allocations. `UINT64_MAX` explicitly allows unbounded planning for controlled
+2. Set `PaimonPlanOptionsV1.struct_size` and request `create_plan`. A finite
+   `planning_byte_limit` creates one native `PlanningBudget` for that call and
+   invokes `TableScan::CreateWithPlanningBudget`, followed by `CreatePlan`.
+   Exhaustion returns `RESOURCE_REFUSED`, unsupported profiles return
+   `UNSUPPORTED`, and native allocation failure returns `OUT_OF_MEMORY`; none
+   publishes a partial plan or retries through the unrestricted planner.
+   `UINT64_MAX` explicitly selects experimental unbounded planning for controlled
    qualification. A completed plan's split count is not admission control.
 3. Obtain opaque split handles using the returned count, then open readers.
    Each split retains the immutable plan; each reader retains its split,
@@ -151,6 +156,33 @@ Call sequence:
    move or mutate a borrowed root or child. A batch retains the reader and pool
    after other handles release. The producer releases both complete roots before
    their C shells and before native reader/table/pool destruction.
+
+Finite planning inherits the SDK's qualified Linux/libstdc++ 9+ C++11 ABI
+profile: local filesystem, unpartitioned append-only `bucket=-1` tables on main,
+explicit retained snapshot/schema identity, matching file schema, ADD-only Avro
+manifest entries with null or Zstandard compression, and Parquet/ORC payloads.
+Unsupported selectors, branches, schema evolution, DELETE entries, external paths,
+indexes and other unsupported metadata fail explicitly. macOS is not enabled for
+finite planning. Empty at bind remains empty without accessing later snapshots.
+
+For finite requests the adapter omits only the ordinary planner mode injected at
+bind (`scan.mode=from-snapshot-full`), keeping its retained numeric
+`scan.snapshot-id`; other unsupported selectors remain subject to native refusal.
+
+The limit is cumulative requested metadata storage **per `create_plan` call**;
+freed allocations do not replenish it. It covers the native bounded factory and
+planner, including retained native input, parsing/decompression and published
+plans/splits. It does not limit total query memory or process RSS. Descriptor
+retention occurs before this call. Plans share that immutable identity rather than
+copying its schema/options again. Fixed bridge plan/pool/executor owners and the
+caller's `ScanContextBuilder` path/schema/options copies and validation precede
+native admission and are outside it, as required by the SDK contract. Reader
+construction/buffers, shared executor/allocator services and later user copies are
+also outside this planning budget. Independent calls receive independent budgets;
+this ABI does not offer one shared budget across an entire query. The bounded
+planner bypasses ordinary shared caches and asynchronous planning, with no
+performance-parity promise. Inputs must stay available and immutable; retaining a
+snapshot identity does not pin retention or provide an atomic filesystem snapshot.
 
 Each reader serializes native advancement and root release. The caller must
 serialize operations and release on the same handle; independent readers may

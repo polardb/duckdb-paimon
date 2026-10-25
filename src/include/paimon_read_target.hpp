@@ -39,8 +39,8 @@ struct PaimonReadTarget {
 
 	static paimon::Identifier SchemaIdentifier(const paimon::Identifier &base, const std::string &branch) {
 		return paimon::Identifier(base.GetDatabaseName(), branch == paimon::Identifier::kDefaultMainBranch
-		                                                      ? base.GetTableName()
-		                                                      : base.GetTableName() + "$branch_" + branch);
+		                                                      ? base.GetObjectName()
+		                                                      : base.GetObjectName() + "$branch_" + branch);
 	}
 
 	static std::string ResolveBranch(const std::optional<std::string> &explicit_branch,

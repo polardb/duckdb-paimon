@@ -151,15 +151,15 @@ void CheckBranch(const paimon::Identifier &identifier, const Options &schema_opt
 	INFO(result.status().ToString());
 	REQUIRE(result.ok());
 	REQUIRE(result.value().base_identifier.GetDatabaseName() == "db");
-	REQUIRE(result.value().base_identifier.GetTableName() == "t");
+	REQUIRE(result.value().base_identifier.GetObjectName() == "t");
 	REQUIRE(result.value().branch == expected);
 	REQUIRE(result.value().schema_identifier.GetDatabaseName() == "db");
-	REQUIRE(result.value().schema_identifier.GetTableName() == expected_loads.back());
+	REQUIRE(result.value().schema_identifier.GetObjectName() == expected_loads.back());
 	REQUIRE(result.value().schema == (expected_loads.size() == 1 ? initial : selected));
 	std::vector<std::string> loads;
 	for (const auto &load : catalog.loads) {
 		REQUIRE(load.GetDatabaseName() == "db");
-		loads.push_back(load.GetTableName());
+		loads.push_back(load.GetObjectName());
 	}
 	REQUIRE(loads == expected_loads);
 }

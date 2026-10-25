@@ -53,6 +53,7 @@
 #include <mutex>
 #include "paimon/executor.h"
 #include "paimon/memory/memory_pool.h"
+#include "paimon/memory/planning_budget.h"
 
 namespace duckdb {
 
@@ -114,14 +115,16 @@ PaimonReadString ReadString(const string &value) noexcept {
 }
 
 struct RetainedPaimonRead {
-	explicit RetainedPaimonRead(const PaimonScanBindData &bind) : path(bind.path), read(bind.bound_read) {
-		options.reserve(read.options.size());
-		for (auto &option : read.options) {
+	explicit RetainedPaimonRead(const PaimonScanBindData &bind)
+	    : path(bind.path), read(std::make_shared<const PaimonBoundRead>(bind.bound_read)) {
+		options.reserve(read->options.size());
+		for (auto &option : read->options) {
 			options.push_back({ReadString(option.first), ReadString(option.second)});
 		}
 	}
 	PaimonTablePath path;
-	PaimonBoundRead read;
+	// Plans share the retained identity instead of copying schema/options per call.
+	std::shared_ptr<const PaimonBoundRead> read;
 	vector<PaimonReadOption> options;
 };
 
@@ -175,7 +178,7 @@ int32_t DescribeBoundRead(const void *descriptor, PaimonBoundReadViewV1 *view, u
 		return PAIMON_READ_INVALID_ARGUMENT;
 	}
 	auto &owner = *static_cast<const RetainedPaimonRead *>(descriptor);
-	auto &read = owner.read;
+	auto &read = *owner.read;
 	view->warehouse = ReadString(owner.path.warehouse);
 	view->database = ReadString(owner.path.dbname);
 	view->table = ReadString(owner.path.tablename);
@@ -209,10 +212,10 @@ public:
 };
 
 struct NativePlan {
-	explicit NativePlan(const PaimonBoundRead &read_p)
-	    : read(read_p), pool(paimon::GetMemoryPool()), executor(std::make_shared<InlineReadExecutor>()) {
+	explicit NativePlan(std::shared_ptr<const PaimonBoundRead> read_p)
+	    : read(std::move(read_p)), pool(paimon::GetMemoryPool()), executor(std::make_shared<InlineReadExecutor>()) {
 	}
-	PaimonBoundRead read;
+	std::shared_ptr<const PaimonBoundRead> read;
 	std::shared_ptr<paimon::MemoryPool> pool;
 	std::shared_ptr<paimon::Executor> executor;
 	std::shared_ptr<paimon::Plan> plan;
@@ -258,6 +261,20 @@ bool ReadCancelled(const PaimonReadCancellationV1 *cancel) {
 	return cancel && cancel->is_cancelled && cancel->is_cancelled(cancel->state);
 }
 
+int32_t NativePlanningError(const paimon::Status &status, const char *message, char *error,
+                            uint64_t capacity) noexcept {
+	if (status.IsCapacityError()) {
+		return ReadBridgeError(PAIMON_READ_RESOURCE_REFUSED, "Native planning byte budget exhausted", error, capacity);
+	}
+	if (status.IsNotImplemented()) {
+		return ReadBridgeError(PAIMON_READ_UNSUPPORTED, "Unsupported bounded native planning profile", error, capacity);
+	}
+	if (status.IsOutOfMemory()) {
+		return ReadBridgeError(PAIMON_READ_OUT_OF_MEMORY, "Native planning allocation failed", error, capacity);
+	}
+	return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, message, error, capacity);
+}
+
 int32_t CreateNativePlan(const void *descriptor, const PaimonPlanOptionsV1 *options,
                          const PaimonReadCancellationV1 *cancel, void **out, uint64_t *count, char *error,
                          uint64_t capacity) noexcept {
@@ -275,36 +292,48 @@ int32_t CreateNativePlan(const void *descriptor, const PaimonPlanOptionsV1 *opti
 		if (ReadCancelled(cancel)) {
 			return PAIMON_READ_CANCELLED;
 		}
-		if (options->planning_byte_limit != UINT64_MAX) {
-			return ReadBridgeError(PAIMON_READ_RESOURCE_REFUSED,
-			                       "Pinned native API cannot enforce a finite planning budget", error, capacity);
-		}
-		auto &read = static_cast<const RetainedPaimonRead *>(descriptor)->read;
+		auto retained = static_cast<const RetainedPaimonRead *>(descriptor)->read;
+		auto &read = *retained;
 		if (!read.native_read_supported) {
 			return ReadBridgeError(PAIMON_READ_UNSUPPORTED,
 			                       "Native bridge requires append-only Parquet or ORC without data evolution", error,
 			                       capacity);
 		}
-		auto owner = std::make_shared<NativePlan>(read);
+		auto owner = std::make_shared<NativePlan>(std::move(retained));
 		if (read.snapshot_id) {
 			paimon::ScanContextBuilder builder(read.table_data_path);
-			auto context = builder.SetOptions(read.options)
-			                   .SetTableSchema(read.table_schema_json)
+			for (auto &option : read.options) {
+				// Binding injected this ordinary-planner mode. The bounded API
+				// accepts only the same retained numeric scan.snapshot-id.
+				if (options->planning_byte_limit == UINT64_MAX || option.first != "scan.mode") {
+					builder.AddOption(option.first, option.second);
+				}
+			}
+			auto context = builder.SetTableSchema(read.table_schema_json)
 			                   .WithMemoryPool(owner->pool)
 			                   .WithExecutor(owner->executor)
 			                   .Finish();
 			if (!context.ok()) {
-				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot construct native scan context", error,
-				                       capacity);
+				return NativePlanningError(context.status(), "Cannot construct native scan context", error, capacity);
 			}
-			auto scan = paimon::TableScan::Create(std::move(context).value());
+			std::shared_ptr<paimon::PlanningBudget> budget;
+			if (options->planning_byte_limit != UINT64_MAX) {
+				auto created = paimon::PlanningBudget::Create(options->planning_byte_limit, owner->pool);
+				if (!created.ok()) {
+					return NativePlanningError(created.status(), "Cannot construct planning budget", error, capacity);
+				}
+				budget = std::move(created).value();
+			}
+			// A finite request never retries through the unrestricted planner.
+			auto scan = budget ? paimon::TableScan::CreateWithPlanningBudget(std::move(context).value(), budget)
+			                   : paimon::TableScan::Create(std::move(context).value());
 			if (!scan.ok()) {
-				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Cannot construct native scan", error, capacity);
+				return NativePlanningError(scan.status(), "Cannot construct native scan", error, capacity);
 			}
 			auto plan = scan.value()->CreatePlan();
 			if (!plan.ok()) {
-				return ReadBridgeError(PAIMON_READ_INTERNAL_ERROR, "Native planning failed for retained snapshot",
-				                       error, capacity);
+				return NativePlanningError(plan.status(), "Native planning failed for retained snapshot", error,
+				                           capacity);
 			}
 			owner->plan = std::move(plan).value();
 			if (!owner->plan || owner->plan->SnapshotId() != read.snapshot_id) {
@@ -371,7 +400,7 @@ int32_t OpenNativeReader(const void *handle, const PaimonReadCancellationV1 *can
 		}
 		auto owner = std::make_shared<NativeReader>(*static_cast<const NativeSplit *>(handle));
 		auto &plan = *owner->split.plan;
-		auto &read = plan.read;
+		auto &read = *plan.read;
 		// Constrain format-owned parallelism too: the pinned Parquet default
 		// changes Arrow's process-global CPU pool and enables async prebuffering.
 		// These operational overrides do not alter the descriptor's query options.

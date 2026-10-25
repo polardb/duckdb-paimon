@@ -477,8 +477,9 @@ static const PaimonReadBridgeV2 &NativeAPI(BridgeFixture &fixture, const BridgeB
 	return *api;
 }
 
-static NativeHandle Plan(const PaimonReadBridgeV2 &api, Descriptor &descriptor, uint64_t &count) {
-	PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+static NativeHandle Plan(const PaimonReadBridgeV2 &api, Descriptor &descriptor, uint64_t &count,
+                         uint64_t byte_limit = UINT64_MAX) {
+	PaimonPlanOptionsV1 options {sizeof(options), byte_limit};
 	void *raw = nullptr;
 	char error[128];
 	auto status = api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, error, sizeof(error));
@@ -539,8 +540,15 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: retained snapshot reads a
                  "[paimon][bound_read_bridge][native_read_bridge]") {
 	auto entry = GENERATE(0, 1, 2);
 	auto format = GENERATE("parquet", "orc");
+#if defined(__linux__)
+	auto byte_limit = GENERATE(UINT64_MAX, uint64_t(64 * 1024 * 1024), UINT64_MAX - uint64_t(1));
+#else
+	// The native SDK explicitly refuses finite planning on other platforms.
+	auto byte_limit = UINT64_MAX;
+#endif
 	SQL(*writer, "CREATE TABLE pm.race.payload (id INTEGER, value INTEGER) WITH ('file.format'='" + string(format) +
-	                 "', 'parquet.read.executor.thread-count'='invalid', 'parquet.read.enable-pre-buffer'='invalid')");
+	                 "', 'bucket'='-1', 'parquet.read.executor.thread-count'='invalid', "
+	                 "'parquet.read.enable-pre-buffer'='invalid')");
 	SQL(*writer, "INSERT INTO pm.race.payload SELECT i::INTEGER, (i * 7)::INTEGER FROM range(5000) r(i)");
 	auto bound = Bind(entry, "payload");
 	auto &api = NativeAPI(*this, bound);
@@ -549,7 +557,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: retained snapshot reads a
 	bound.data.reset();
 	SQL(*writer, "INSERT INTO pm.race.payload VALUES (9000, -1)");
 	uint64_t count = 0;
-	auto plan = Plan(api, descriptor, count);
+	auto plan = Plan(api, descriptor, count, byte_limit);
 	REQUIRE(count > 0);
 	api.descriptor.release(descriptor.handle);
 	descriptor.handle = nullptr;
@@ -638,7 +646,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: empty at bind never reads
 	Retain(bound, descriptor);
 	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
 	uint64_t count = 99;
-	auto plan = Plan(api, descriptor, count);
+	auto plan = Plan(api, descriptor, count, GENERATE(uint64_t(0), UINT64_MAX));
 	REQUIRE(count == 0);
 	void *split = reinterpret_cast<void *>(1);
 	REQUIRE(api.get_split(plan.get(), 0, &split) == PAIMON_READ_INVALID_ARGUMENT);
@@ -654,7 +662,7 @@ struct CancelAfterChecks {
 	}
 };
 
-TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: refuses budgets before I/O and clears all failed outputs",
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: exhausted budgets publish no plan and clear failed outputs",
                  "[paimon][bound_read_bridge][native_read_bridge]") {
 	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
 	auto bound = Bind();
@@ -662,15 +670,25 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: refuses budgets before I/
 	Descriptor descriptor(api.descriptor);
 	Retain(bound, descriptor);
 	std::filesystem::remove_all(warehouse);
-	PaimonPlanOptionsV1 options {sizeof(options), 1024};
+	PaimonPlanOptionsV1 options {sizeof(options), 0};
 	void *plan = reinterpret_cast<void *>(1);
 	uint64_t count = 99;
 	char error[128];
-	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
-	        PAIMON_READ_RESOURCE_REFUSED);
-	REQUIRE_FALSE(plan);
-	REQUIRE(count == 0);
-	REQUIRE(string(error).find("budget") != string::npos);
+	for (auto limit : {uint64_t(0), uint64_t(1)}) {
+		options.planning_byte_limit = limit;
+		plan = reinterpret_cast<void *>(1);
+		count = 99;
+#if defined(__linux__)
+		REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+		        PAIMON_READ_RESOURCE_REFUSED);
+		REQUIRE(string(error).find("budget") != string::npos);
+#else
+		REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+		        PAIMON_READ_UNSUPPORTED);
+#endif
+		REQUIRE_FALSE(plan);
+		REQUIRE(count == 0);
+	}
 	options.planning_byte_limit = UINT64_MAX;
 	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
 	        PAIMON_READ_INTERNAL_ERROR);
@@ -689,19 +707,44 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: refuses budgets before I/
 	api.release_batch(nullptr);
 }
 
+TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: finite planning refuses unsupported profile without fallback",
+                 "[paimon][bound_read_bridge][native_read_bridge]") {
+	SQL(*writer, "CREATE TABLE pm.race.bucketed (id INTEGER, value INTEGER) WITH ('bucket'='1')");
+	SQL(*writer, "INSERT INTO pm.race.bucketed VALUES (1, 7)");
+	auto bound = Bind(0, "bucketed");
+	auto &api = NativeAPI(*this, bound);
+	Descriptor descriptor(api.descriptor);
+	Retain(bound, descriptor);
+	PaimonPlanOptionsV1 options {sizeof(options), 64 * 1024 * 1024};
+	void *plan = reinterpret_cast<void *>(1);
+	uint64_t count = 99;
+	char error[128];
+	REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
+	        PAIMON_READ_UNSUPPORTED);
+	REQUIRE_FALSE(plan);
+	REQUIRE(count == 0);
+	REQUIRE(error[0]);
+}
+
 TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: missing retained snapshots and payloads are errors not EOF",
                  "[paimon][bound_read_bridge][native_read_bridge]") {
-	SQL(*writer, "INSERT INTO pm.race.t VALUES (1, 7)");
-	auto bound = Bind();
+#if defined(__linux__)
+	auto byte_limit = GENERATE(UINT64_MAX, uint64_t(64 * 1024 * 1024));
+#else
+	auto byte_limit = UINT64_MAX;
+#endif
+	SQL(*writer, "CREATE TABLE pm.race.failures (id INTEGER, value INTEGER) WITH ('bucket'='-1')");
+	SQL(*writer, "INSERT INTO pm.race.failures VALUES (1, 7)");
+	auto bound = Bind(0, "failures");
 	auto &api = NativeAPI(*this, bound);
 	Descriptor descriptor(api.descriptor);
 	Retain(bound, descriptor);
 	SECTION("retained snapshot expired despite newer snapshot") {
-		SQL(*writer, "INSERT INTO pm.race.t VALUES (2, 14)");
-		REQUIRE(std::filesystem::remove(warehouse + "/race.db/t/snapshot/snapshot-1"));
+		SQL(*writer, "INSERT INTO pm.race.failures VALUES (2, 14)");
+		REQUIRE(std::filesystem::remove(warehouse + "/race.db/failures/snapshot/snapshot-1"));
 		uint64_t count = 9;
 		void *raw = nullptr;
-		PaimonPlanOptionsV1 options {sizeof(options), UINT64_MAX};
+		PaimonPlanOptionsV1 options {sizeof(options), byte_limit};
 		REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, nullptr, 0) ==
 		        PAIMON_READ_INTERNAL_ERROR);
 		REQUIRE_FALSE(raw);
@@ -709,7 +752,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: missing retained snapshot
 	}
 	SECTION("data removed after plan") {
 		uint64_t count;
-		auto plan = Plan(api, descriptor, count);
+		auto plan = Plan(api, descriptor, count, byte_limit);
 		REQUIRE(count == 1);
 		auto split = Split(api, plan, 0);
 		uint64_t removed = 0;
