@@ -34,6 +34,13 @@
 
 using namespace duckdb;
 
+#if defined(__linux__) && defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI && _GLIBCXX_RELEASE >= 9
+#define PAIMON_TEST_FINITE_PLANNING 1
+#else
+#define PAIMON_TEST_FINITE_PLANNING 0
+#endif
+
+
 static_assert(std::is_standard_layout<PaimonReadBridgeV1>::value, "Bridge must have C layout");
 static_assert(std::is_standard_layout<PaimonBoundReadViewV1>::value, "Views must have C layout");
 
@@ -540,7 +547,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: retained snapshot reads a
                  "[paimon][bound_read_bridge][native_read_bridge]") {
 	auto entry = GENERATE(0, 1, 2);
 	auto format = GENERATE("parquet", "orc");
-#if defined(__linux__)
+#if PAIMON_TEST_FINITE_PLANNING
 	auto byte_limit = GENERATE(UINT64_MAX, uint64_t(64 * 1024 * 1024), UINT64_MAX - uint64_t(1));
 #else
 	// The native SDK explicitly refuses finite planning on other platforms.
@@ -678,7 +685,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: exhausted budgets publish
 		options.planning_byte_limit = limit;
 		plan = reinterpret_cast<void *>(1);
 		count = 99;
-#if defined(__linux__)
+#if PAIMON_TEST_FINITE_PLANNING
 		REQUIRE(api.create_plan(descriptor.handle, &options, nullptr, &plan, &count, error, sizeof(error)) ==
 		        PAIMON_READ_RESOURCE_REFUSED);
 		REQUIRE(string(error).find("budget") != string::npos);
@@ -728,7 +735,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: finite planning refuses u
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: missing retained snapshots and payloads are errors not EOF",
                  "[paimon][bound_read_bridge][native_read_bridge]") {
-#if defined(__linux__)
+#if PAIMON_TEST_FINITE_PLANNING
 	auto byte_limit = GENERATE(UINT64_MAX, uint64_t(64 * 1024 * 1024));
 #else
 	auto byte_limit = UINT64_MAX;
@@ -780,7 +787,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: missing retained snapshot
 
 TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: cancellation before and after native calls publishes nothing",
                  "[paimon][bound_read_bridge][native_read_bridge]") {
-#if defined(__linux__)
+#if PAIMON_TEST_FINITE_PLANNING
 	auto byte_limit = GENERATE(UINT64_MAX, uint64_t(64 * 1024 * 1024));
 #else
 	auto byte_limit = UINT64_MAX;
@@ -1053,7 +1060,7 @@ TEST_CASE_METHOD(BridgeFixture, "Paimon native bridge: zero-record Avro blocks r
 	uint64_t count = 99;
 	auto status = api.create_plan(descriptor.handle, &options, nullptr, &raw, &count, nullptr, 0);
 	NativeHandle plan(raw, api.release_plan);
-#if defined(__linux__) && defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI && _GLIBCXX_RELEASE >= 9
+#if PAIMON_TEST_FINITE_PLANNING
 	if (kind == "null-empty" || kind == "zstd-empty") {
 		REQUIRE(status == PAIMON_READ_OK);
 		REQUIRE(count > 0);
