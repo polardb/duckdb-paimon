@@ -9,7 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exercise the actual CMake patch command on pinned, offline Git fixtures."""
+"""Exercise the actual ExternalProject patch step on pinned, offline Git fixtures."""
 
 import argparse
 import pathlib
@@ -34,6 +34,7 @@ def main():
     recipe = text[text.index("set(PAIMON_CPP_PATCHES") : text.index("set(PAIMON_CPP_TOOLCHAIN_ARGS)")]
     names = re.findall(r"\$\{CMAKE_CURRENT_SOURCE_DIR\}/(patches/[^\s)]+)", recipe)
     assert len(names) >= 2, "Expected the native installation and planner patches"
+    patch_command = re.search(r"^  PATCH_COMMAND (.+)$", text, re.MULTILINE).group(1)
     files = set()
     for name in names:
         files.update(re.findall(r"^--- a/(.+)$", (root / name).read_text(), re.MULTILINE))
@@ -57,28 +58,34 @@ def main():
                 shutil.copyfile(root / name, target)
                 if index == broken:
                     target.write_text("deliberately invalid native patch\n")
-            command = work / "command.sh"
-            script = work / "command.cmake"
-            script.write_text(
-                'set(CMAKE_CURRENT_SOURCE_DIR "' + project.as_posix() + '")\n'
+            build = work / "build"
+            (project / "CMakeLists.txt").write_text(
+                'cmake_minimum_required(VERSION 3.20)\nproject(patch_control NONE)\ninclude(ExternalProject)\n'
                 'set(PAIMON_CPP_SOURCE_DIR "'
                 + checkout.as_posix()
                 + '")\n'
                 + recipe
-                + '\nfile(WRITE "'
-                + command.as_posix()
-                + '" "${PAIMON_CPP_PATCH_SCRIPT}")\n'
+                + '\nfile(WRITE "${CMAKE_CURRENT_BINARY_DIR}/patch-path" "${PAIMON_CPP_PATCH_FILE}")\n'
+                'ExternalProject_Add(native_patch SOURCE_DIR "${PAIMON_CPP_SOURCE_DIR}"\n'
+                'DOWNLOAD_COMMAND "" UPDATE_COMMAND ""\nPATCH_COMMAND '
+                + patch_command
+                + '\nCONFIGURE_COMMAND "" BUILD_COMMAND "" INSTALL_COMMAND "")\n'
             )
-            result = run([args.cmake, "-P", str(script)])
+            generator = "Ninja" if shutil.which("ninja") else "Unix Makefiles"
+            result = run([args.cmake, "-S", str(project), "-B", str(build), "-G", generator])
             assert result.returncode == 0, result.stderr
-            result = run(["sh", "-c", command.read_text()])
-            expected = 0 if broken is None else 1
-            assert result.returncode == expected, (broken, result.returncode, result.stderr)
+            result = run([args.cmake, "--build", str(build)])
+            assert (result.returncode == 0) == (broken is None), (
+                broken,
+                result.returncode,
+                result.stdout,
+                result.stderr,
+            )
             for index, name in enumerate(names):
                 applied = run(["git", "apply", "--reverse", "--check", str(root / name)], cwd=checkout)
                 assert (applied.returncode == 0) == (broken is None or index < broken), (broken, name)
             if broken is None:
-                result = run(["sh", "-c", command.read_text()])
+                result = run(["sh", (build / "patch-path").read_text()])
                 assert result.returncode == 0, result.stderr
             print("PASS", "apply and idempotence" if broken is None else "failure at patch " + str(broken))
 
