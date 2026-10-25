@@ -117,7 +117,7 @@ or native-reader cancellation/ownership qualification.
 V2 is a partial implementation of [#139](https://github.com/polardb/duckdb-paimon/issues/139),
 layered on the retained descriptor contract from PR #135. It does **not** close
 #139 or qualify unrestricted production/GPU use. The native SDK is pinned to
-`8f03510b661c2a2a590752b30292aa17376dbc23` (Apache Paimon C++ #462); the
+`c5bbc10c50476d61596664b50478ae333a0bf6dc` (Apache Paimon C++ #462); the
 DuckDB pin remains unchanged.
 
 `TryGetPaimonNativeReadBridge` authenticates the same callback/singleton identity
@@ -159,7 +159,7 @@ Call sequence:
    their C shells and before native reader/table/pool destruction.
 
 Finite planning inherits the SDK's qualified Linux/libstdc++ 9+ C++11 ABI
-profile: local filesystem, unpartitioned append-only `bucket=-1` tables on main,
+profile with matching static Zstandard workspace APIs: local filesystem, unpartitioned append-only `bucket=-1` tables on main,
 explicit retained snapshot/schema identity, matching file schema, ADD-only Avro
 manifest entries with null or Zstandard compression, and Parquet/ORC payloads.
 Unsupported selectors, branches, schema evolution, DELETE entries, external paths,
