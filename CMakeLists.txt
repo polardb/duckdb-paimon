@@ -84,7 +84,6 @@ set(PAIMON_CPP_STATIC_DEPENDENCY_LIBS
     ${PAIMON_CPP_BUILD_DIR}/snappy_ep-install/lib/libsnappy${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/tbb_ep-install/lib/libtbb${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/zlib_ep-install/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}
-    ${PAIMON_CPP_BUILD_DIR}/zstd_ep-install/lib/libzstd${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
 if(PAIMON_ENABLE_OSS)
   list(
