@@ -27,7 +27,9 @@ set(PAIMON_CPP_LIB ${PAIMON_CPP_PREFIX}/lib64)
 file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 
 set(PAIMON_CPP_PATCHES
-    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch)
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-bounded-empty-avro-block.patch
+)
 
 # Build patch command: apply each patch idempotently
 set(PAIMON_CPP_PATCH_SCRIPT "")
@@ -35,10 +37,15 @@ foreach(patch IN LISTS PAIMON_CPP_PATCHES)
   string(
     APPEND
     PAIMON_CPP_PATCH_SCRIPT
-    "git -C ${PAIMON_CPP_SOURCE_DIR} apply --reverse --check ${patch} 2>/dev/null || git -C ${PAIMON_CPP_SOURCE_DIR} apply ${patch} && "
+    "if git -C \"${PAIMON_CPP_SOURCE_DIR}\" apply --reverse --check \"${patch}\" 2>/dev/null; then :; else git -C \"${PAIMON_CPP_SOURCE_DIR}\" apply \"${patch}\" || exit 1; fi; "
   )
 endforeach()
 string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")
+set(PAIMON_CPP_PATCH_FILE "${CMAKE_CURRENT_BINARY_DIR}/apply-paimon-patches.sh")
+file(
+  GENERATE
+  OUTPUT "${PAIMON_CPP_PATCH_FILE}"
+  CONTENT "${PAIMON_CPP_PATCH_SCRIPT}")
 
 set(PAIMON_CPP_TOOLCHAIN_ARGS)
 set(PAIMON_CPP_SYSTEM_LIBS)
@@ -63,6 +70,7 @@ if(CMAKE_TOOLCHAIN_FILE AND DEFINED VCPKG_TARGET_TRIPLET)
 endif()
 
 set(PAIMON_CPP_STATIC_DEPENDENCY_LIBS
+    ${PAIMON_CPP_BUILD_DIR}/zstd_ep-install/lib/libzstd${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/arrow_ep-install/lib/libarrow${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/arrow_ep-install/lib/libarrow_acero${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/arrow_ep-install/lib/libarrow_bundled_dependencies${CMAKE_STATIC_LIBRARY_SUFFIX}
@@ -81,7 +89,6 @@ set(PAIMON_CPP_STATIC_DEPENDENCY_LIBS
     ${PAIMON_CPP_BUILD_DIR}/snappy_ep-install/lib/libsnappy${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/tbb_ep-install/lib/libtbb${CMAKE_STATIC_LIBRARY_SUFFIX}
     ${PAIMON_CPP_BUILD_DIR}/zlib_ep-install/lib/libz${CMAKE_STATIC_LIBRARY_SUFFIX}
-    ${PAIMON_CPP_BUILD_DIR}/zstd_ep-install/lib/libzstd${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
 if(PAIMON_ENABLE_OSS)
   list(
@@ -115,7 +122,7 @@ ExternalProject_Add(
   paimon_cpp_ep
   SOURCE_DIR ${PAIMON_CPP_SOURCE_DIR}
   BINARY_DIR ${PAIMON_CPP_BUILD_DIR}
-  PATCH_COMMAND sh -c "${PAIMON_CPP_PATCH_SCRIPT}"
+  PATCH_COMMAND sh "${PAIMON_CPP_PATCH_FILE}"
   CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
              -DCMAKE_INSTALL_PREFIX=${PAIMON_CPP_PREFIX}
              -DCMAKE_INSTALL_LIBDIR=lib64
@@ -142,6 +149,9 @@ ExternalProject_Add(
     $<$<BOOL:${PAIMON_ENABLE_OSS}>:${PAIMON_CPP_LIB}/libpaimon_oss_file_system${CMAKE_STATIC_LIBRARY_SUFFIX}>
     $<$<BOOL:${PAIMON_ENABLE_S3}>:${PAIMON_CPP_LIB}/libpaimon_s3_file_system${CMAKE_STATIC_LIBRARY_SUFFIX}>
     ${PAIMON_CPP_STATIC_DEPENDENCY_LIBS})
+
+ExternalProject_Add_StepDependencies(paimon_cpp_ep patch
+                                     "${PAIMON_CPP_PATCH_FILE}")
 
 # Extension sources
 set(EXTENSION_SOURCES
@@ -227,6 +237,49 @@ target_link_libraries(${EXTENSION_NAME} ${PAIMON_CPP_LIBS})
 target_link_libraries(${TARGET_NAME}_loadable_extension ${PAIMON_CPP_LIBS})
 
 if(BUILD_UNITTESTS)
+  # SHOULD_LINK is resolved by DuckDB after extension subdirectories configure.
+  # Use the same resolver now so explicit static-link overrides are respected.
+  duckdb_resolve_static_link(PAIMON_TEST_CAPABILITIES
+                             PAIMON_TEST_LINKED_EXTENSIONS)
+  set(PAIMON_BRIDGE_BUILTIN FALSE)
+  if(paimon IN_LIST PAIMON_TEST_LINKED_EXTENSIONS)
+    set(PAIMON_BRIDGE_BUILTIN TRUE)
+  endif()
+  # Same contracts run on the built-in and dynamic-only hosts.
+  add_executable(
+    unittest_paimon_bridge EXCLUDE_FROM_ALL
+    test/cpp/main.cpp test/cpp/paimon_bound_read_bridge.cpp
+    test/cpp/paimon_read_bridge_c.c)
+  target_include_directories(unittest_paimon_bridge
+                             PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
+  if(PAIMON_BRIDGE_BUILTIN)
+    # Distribution builds provide duckdb_static through PREBUILT_BINARY.
+    target_link_libraries(unittest_paimon_bridge duckdb_static)
+    link_extension_libraries(unittest_paimon_bridge "")
+    link_threads(unittest_paimon_bridge "")
+  else()
+    target_link_libraries(unittest_paimon_bridge duckdb)
+  endif()
+  target_link_libraries(unittest_paimon_bridge duckdb_yyjson ${CMAKE_DL_LIBS})
+  target_compile_definitions(
+    unittest_paimon_bridge
+    PRIVATE
+      PAIMON_BRIDGE_BUILTIN=$<BOOL:${PAIMON_BRIDGE_BUILTIN}>
+      PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+      PAIMON_BRIDGE_EXTENSION_PATH="$<TARGET_FILE:${TARGET_NAME}_loadable_extension>"
+  )
+  add_dependencies(unittest_paimon_bridge ${TARGET_NAME}_loadable_extension)
+  set_target_properties(
+    unittest_paimon_bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                                      "${CMAKE_BINARY_DIR}/test")
+  add_custom_target(
+    paimon_check_bound_read_bridge
+    COMMAND
+      ${CMAKE_COMMAND} "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon_bridge>"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/bridge-test-work" -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+    DEPENDS unittest_paimon_bridge
+    USES_TERMINAL)
   add_executable(
     unittest_paimon EXCLUDE_FROM_ALL
     test/cpp/main.cpp test/cpp/paimon_read_target.cpp

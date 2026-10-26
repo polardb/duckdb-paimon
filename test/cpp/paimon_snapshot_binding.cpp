@@ -25,6 +25,7 @@
 #include "paimon_extension.hpp"
 #include "paimon_functions.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -396,20 +397,35 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: missing branch and fallback", 
 	CAPTURE(static_cast<int>(entry), warehouse);
 	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
 	CopyBranch(warehouse + "/race.db/t");
-	// The filesystem catalog currently loads main's schema for a missing branch;
-	// the branch-aware native scanner then rejects it. This must not become
-	// an empty/main read, regardless of the scan entrypoint.
-	const auto missing = Catch::Contains("not found latest schema");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_missing"), missing);
+	// A missing branch may fail at native schema lookup or attached catalog
+	// lookup. Both must reject the bind rather than return an empty/main read.
+	auto missing = [&](const string &table) {
+		try {
+			Bind(reader, warehouse, entry, table);
+			FAIL("Missing branch unexpectedly produced a binding");
+		} catch (const std::exception &exception) {
+			ErrorData error(exception);
+			if (error.Type() == ExceptionType::CATALOG) {
+				REQUIRE(entry == Entry::CATALOG);
+				auto subtype = error.ExtraInfo().find("error_subtype");
+				REQUIRE(subtype != error.ExtraInfo().end());
+				REQUIRE(subtype->second == "MISSING_ENTRY");
+			} else {
+				REQUIRE(error.Type() == ExceptionType::IO);
+				REQUIRE(error.RawMessage().find("Not exist:") != string::npos);
+			}
+		}
+	};
+	missing("t$branch_missing");
 	// Nonempty names are not trimmed to an existing branch.
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t$branch_ dev "), missing);
+	missing("t$branch_ dev ");
 	SetSchemaOption(warehouse + "/race.db/t/schema/schema-0", "branch", " dev ");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "t"), missing);
+	missing("t");
 	auto main = Bind(reader, warehouse, entry, "t$branch_main");
 	REQUIRE(Count(reader, main) == 1);
 	ExpectRows(Read(reader, main), {{Value(1), Value(10)}});
 	SQL(writer, "CREATE TABLE pm.race.missing_option (id INTEGER) WITH ('branch'='missing')");
-	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "missing_option"), missing);
+	missing("missing_option");
 	SQL(writer, "CREATE TABLE pm.race.fallback (id INTEGER) WITH ('scan.fallback-branch'='main')");
 	REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "fallback"),
 	                    Catch::Contains("does not support a non-empty scan.fallback-branch"));

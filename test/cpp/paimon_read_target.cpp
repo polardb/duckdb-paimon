@@ -119,7 +119,7 @@ public:
 	paimon::Result<bool> TableExists(const paimon::Identifier &) const override {
 		UnexpectedCall();
 	}
-	std::string GetDatabaseLocation(const std::string &) const override {
+	paimon::Result<std::string> GetDatabaseLocation(const std::string &) const override {
 		UnexpectedCall();
 	}
 	paimon::Result<std::string> GetTableLocation(const paimon::Identifier &) const override {
@@ -132,6 +132,10 @@ public:
 		UnexpectedCall();
 	}
 	const Options &GetOptions() const override {
+		UnexpectedCall();
+	}
+	paimon::Result<std::optional<paimon::SnapshotInfo>> GetLatestSnapshot(const paimon::Identifier &,
+	                                                                      const std::string &) const override {
 		UnexpectedCall();
 	}
 	paimon::Result<std::vector<paimon::SnapshotInfo>> ListSnapshots(const paimon::Identifier &,
@@ -151,15 +155,15 @@ void CheckBranch(const paimon::Identifier &identifier, const Options &schema_opt
 	INFO(result.status().ToString());
 	REQUIRE(result.ok());
 	REQUIRE(result.value().base_identifier.GetDatabaseName() == "db");
-	REQUIRE(result.value().base_identifier.GetTableName() == "t");
+	REQUIRE(result.value().base_identifier.GetObjectName() == "t");
 	REQUIRE(result.value().branch == expected);
 	REQUIRE(result.value().schema_identifier.GetDatabaseName() == "db");
-	REQUIRE(result.value().schema_identifier.GetTableName() == expected_loads.back());
+	REQUIRE(result.value().schema_identifier.GetObjectName() == expected_loads.back());
 	REQUIRE(result.value().schema == (expected_loads.size() == 1 ? initial : selected));
 	std::vector<std::string> loads;
 	for (const auto &load : catalog.loads) {
 		REQUIRE(load.GetDatabaseName() == "db");
-		loads.push_back(load.GetTableName());
+		loads.push_back(load.GetObjectName());
 	}
 	REQUIRE(loads == expected_loads);
 }
@@ -199,6 +203,12 @@ TEST_CASE("Paimon read target: blank values normalize to bare main", "[paimon][r
 		if (!blank.empty()) {
 			CheckBranch(paimon::Identifier("db", "t$branch_" + blank), {{"branch", "dev"}}, {}, "main", {"t"});
 		}
+	}
+	for (const std::string invalid : {"t$branch_", "$branch_ ", "t$branch_ $snapshots", "t$$branch_ "}) {
+		CAPTURE(invalid);
+		SpyCatalog catalog;
+		REQUIRE_FALSE(PaimonReadTarget::Load(catalog, paimon::Identifier("db", invalid), {}).ok());
+		REQUIRE(catalog.loads.empty());
 	}
 }
 

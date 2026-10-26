@@ -188,33 +188,34 @@ physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
 statement ok
 CREATE TABLE bound_pm.__test_binding.other_branch (id INTEGER) WITH ("branch"='audit');
 
-# The native filesystem catalog currently ignores branch schema identifiers.
-# Missing branches must still fail in the branch-aware scanner.
+# The SDK now rejects a missing selected branch during schema lookup.
+# Keep its precise audit identity: the scan must not fall back to main.
 statement error
 SELECT * FROM paimon_scan('./data/__test_binding.db/other_branch');
 ----
-not found latest schema
+Not exist: Identifier{database='__test_binding', object='other_branch$branch_audit'} not exist
 
 statement error
 SELECT * FROM bound_pm.__test_binding.other_branch;
 ----
-not found latest schema
+Not exist: Identifier{database='__test_binding', object='other_branch$branch_audit'} not exist
 
 # Missing branches must fail instead of silently reading main's four rows.
 statement error
 SELECT * FROM paimon_scan('./data', '__test_binding', 't$branch_audit');
 ----
-not found latest schema
+Not exist: Identifier{database='__test_binding', object='t$branch_audit'} not exist
 
 statement error
 SELECT * FROM paimon_scan('./data/__test_binding.db/t$branch_audit');
 ----
-not found latest schema
+Not exist: Identifier{database='__test_binding', object='t$branch_audit'} not exist
 
+# An absent explicit attached entry fails catalog lookup before scan binding.
 statement error
 SELECT * FROM bound_pm.__test_binding."t$branch_audit";
 ----
-not found latest schema
+Table with name t$branch_audit does not exist
 
 # Explicit main is supported through every SQL entrypoint.
 query II
