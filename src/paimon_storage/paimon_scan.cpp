@@ -23,6 +23,7 @@
  */
 
 #include "duckdb.hpp"
+#include "utf8proc_wrapper.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/function/table/arrow.hpp"
@@ -44,6 +45,8 @@
 #include "paimon/api.h"
 #include "paimon/catalog/identifier.h"
 #include "paimon/predicate/predicate_builder.h"
+#include "paimon/predicate/compound_predicate.h"
+#include "paimon/predicate/leaf_predicate.h"
 #include "paimon/predicate/predicate_utils.h"
 #include "paimon/schema/schema.h"
 
@@ -100,6 +103,167 @@ public:
 		return bound_read.branch;
 	}
 };
+
+static LogicalType PaimonPruningAtomType() {
+	return LogicalType::STRUCT(
+	    {{"op", LogicalType::VARCHAR}, {"field_index", LogicalType::INTEGER}, {"literal", LogicalType::BIGINT}});
+}
+
+static void AppendPaimonPruningAtoms(PaimonScanBindData &bind, const std::shared_ptr<paimon::Predicate> &predicate,
+                                     vector<Value> &atoms) {
+	if (!predicate) {
+		return;
+	}
+	using FunctionType = paimon::Function::Type;
+	auto operation = predicate->GetFunction().GetType();
+	if (operation == FunctionType::AND) {
+		auto conjunction = dynamic_cast<const paimon::CompoundPredicate *>(predicate.get());
+		if (conjunction) {
+			for (auto &child : conjunction->Children()) {
+				AppendPaimonPruningAtoms(bind, child, atoms);
+			}
+		}
+		return;
+	}
+	const char *op;
+	switch (operation) {
+	case FunctionType::EQUAL:
+		op = "eq";
+		break;
+	case FunctionType::NOT_EQUAL:
+		op = "ne";
+		break;
+	case FunctionType::LESS_THAN:
+		op = "lt";
+		break;
+	case FunctionType::LESS_OR_EQUAL:
+		op = "le";
+		break;
+	case FunctionType::GREATER_THAN:
+		op = "gt";
+		break;
+	case FunctionType::GREATER_OR_EQUAL:
+		op = "ge";
+		break;
+	default:
+		// In particular, never extract a mandatory conjunct from inside an OR.
+		return;
+	}
+	auto leaf = dynamic_cast<const paimon::LeafPredicate *>(predicate.get());
+	if (!leaf || leaf->Literals().size() != 1 || leaf->Literals()[0].IsNull()) {
+		return;
+	}
+	auto native_type = leaf->GetFieldType();
+	if ((native_type != paimon::FieldType::INT && native_type != paimon::FieldType::BIGINT) ||
+	    leaf->Literals()[0].GetType() != native_type) {
+		return;
+	}
+	auto index = leaf->FieldIndex();
+	auto &types = bind.arrow_table.GetTypes();
+	if (index < 0 || static_cast<idx_t>(index) >= bind.field_names.size() ||
+	    static_cast<idx_t>(index) >= types.size() || bind.field_names[index] != leaf->FieldName()) {
+		return;
+	}
+	auto duck_type = native_type == paimon::FieldType::INT ? LogicalType::INTEGER : LogicalType::BIGINT;
+	if (types[index] != duck_type) {
+		return;
+	}
+	// The tuple was checked against the bound full schema before dropping its
+	// redundant name/type. Ordinals are never positions in a projected reader.
+	int64_t literal = native_type == paimon::FieldType::INT ? leaf->Literals()[0].GetValue<int32_t>()
+	                                                        : leaf->Literals()[0].GetValue<int64_t>();
+	atoms.push_back(Value::STRUCT(
+	    {{"op", Value(op)}, {"field_index", Value::INTEGER(index)}, {"literal", Value::BIGINT(literal)}}));
+}
+
+// Bound the input shape before constructing any owned metadata Values. This is
+// not an allocation-byte quota: consumers must qualify their host/build's worst
+// case and debit it before invoking this callback. Unavailable metadata leaves
+// the original CPU read/error and residual-filter behavior intact.
+struct PaimonMetadataCopyProfile {
+	static constexpr idx_t MAX_TEXT_BYTES = 1024 * 1024;
+	static constexpr idx_t MAX_OPTIONS = 64;
+	static constexpr idx_t MAX_PREDICATE_VISITS = 256;
+	static constexpr idx_t MAX_PREDICATE_DEPTH = 16; // Root depth is zero.
+	idx_t text_left = MAX_TEXT_BYTES;
+	idx_t visits_left = MAX_PREDICATE_VISITS;
+
+	bool Text(const string &text) {
+		if (text.size() > text_left || !Utf8Proc::IsValid(text.data(), text.size())) {
+			return false;
+		}
+		text_left -= text.size();
+		return true;
+	}
+
+	bool Predicate(const std::shared_ptr<paimon::Predicate> &predicate, idx_t depth = 0) {
+		if (!visits_left || depth > MAX_PREDICATE_DEPTH) {
+			return false;
+		}
+		--visits_left;
+		if (!predicate || predicate->GetFunction().GetType() != paimon::Function::Type::AND) {
+			// Atom extraction also treats OR and other opaque operations as leaves.
+			return true;
+		}
+		auto conjunction = dynamic_cast<const paimon::CompoundPredicate *>(predicate.get());
+		if (!conjunction) {
+			return true;
+		}
+		if (conjunction->Children().size() > visits_left) {
+			return false;
+		}
+		for (const auto &child : conjunction->Children()) {
+			if (!Predicate(child, depth + 1)) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+static BindInfo PaimonScanBindInfo(TableFunctionGetBindInfoInput &input) {
+	BindInfo info(ScanType::EXTERNAL);
+	if (!input.bind_data) {
+		return info;
+	}
+	auto &bind = input.bind_data->Cast<PaimonScanBindData>();
+	if (bind.bound_read.deferred_error) {
+		// Unavailable metadata means keep the original CPU/error path, not empty.
+		return info;
+	}
+	auto &read = bind.bound_read;
+	PaimonMetadataCopyProfile profile;
+	if (read.options.size() > PaimonMetadataCopyProfile::MAX_OPTIONS || !profile.Text(read.table_data_path) ||
+	    !profile.Text(read.branch) || !profile.Text(read.table_schema_json)) {
+		return info;
+	}
+	for (const auto &entry : read.options) {
+		if (!profile.Text(entry.first) || !profile.Text(entry.second)) {
+			return info;
+		}
+	}
+	if (!profile.Predicate(bind.predicates)) {
+		return info;
+	}
+	info.InsertOption("paimon.version", Value::INTEGER(1));
+	info.InsertOption("paimon.path", Value(read.table_data_path));
+	info.InsertOption("paimon.branch", Value(read.branch));
+	info.InsertOption("paimon.schema_json", Value(read.table_schema_json));
+	info.InsertOption("paimon.schema_id", Value::BIGINT(read.read_schema_id));
+	info.InsertOption("paimon.snapshot_id",
+	                  read.snapshot_id ? Value::BIGINT(*read.snapshot_id) : Value(LogicalType::BIGINT));
+	vector<Value> options;
+	for (auto &entry : read.options) {
+		options.push_back(Value::STRUCT({{"key", Value(entry.first)}, {"value", Value(entry.second)}}));
+	}
+	info.InsertOption("paimon.options",
+	                  Value::LIST(LogicalType::STRUCT({{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}}),
+	                              std::move(options)));
+	vector<Value> atoms;
+	AppendPaimonPruningAtoms(bind, bind.predicates, atoms);
+	info.InsertOption("paimon.pruning", Value::LIST(PaimonPruningAtomType(), std::move(atoms)));
+	return info;
+}
 
 static std::shared_ptr<paimon::Predicate> TryConvertComparison(const BoundFunctionExpression &comp,
                                                                const LogicalGet &get) {
@@ -1186,6 +1350,7 @@ static InsertionOrderPreservingMap<string> PaimonScanToString(TableFunctionToStr
 static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 	auto fun = TableFunction("paimon_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
+	fun.get_bind_info = PaimonScanBindInfo;
 	fun.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated: auto-detected from table schema
 		options.Add("file_format", LogicalType::VARCHAR);     // deprecated: auto-detected from table schema
@@ -1214,6 +1379,7 @@ static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 static void AddPaimonScanFullPathFunction(CreateTableFunctionInfo &info) {
 	auto fun_fullpath =
 	    TableFunction("paimon_scan", {LogicalType::VARCHAR}, PaimonScan, PaimonScanBind, PaimonScanInitGlobal);
+	fun_fullpath.get_bind_info = PaimonScanBindInfo;
 	fun_fullpath.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("manifest_format", LogicalType::VARCHAR); // deprecated
 		options.Add("file_format", LogicalType::VARCHAR);     // deprecated
