@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a reproducible problem with duckdb-paimon.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before reporting a bug. See the [contributing guide](https://github.com/polardb/duckdb-paimon/blob/main/CONTRIBUTING.md).
+
+        For security vulnerabilities, use the [private reporting form](https://github.com/polardb/duckdb-paimon/security/advisories/new). Remove credentials and sensitive data from examples and logs.
+  - type: input
+    id: duckdb_version
+    attributes:
+      label: DuckDB version
+      description: Include the output of SELECT version(); if available.
+    validations:
+      required: true
+  - type: input
+    id: extension_version
+    attributes:
+      label: Extension version
+      description: Include the release tag or commit hash. If unknown, describe how you installed the extension.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and CPU architecture
+      placeholder: e.g. Ubuntu 24.04 x86_64 or macOS ARM64
+    validations:
+      required: true
+  - type: input
+    id: catalog_storage
+    attributes:
+      label: Catalog and storage
+      description: If relevant, specify the catalog type and storage backend, such as a filesystem catalog on local storage or a REST catalog with S3.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include minimal SQL or commands and any table setup or sample data needed to reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What should happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      description: What happens instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant error messages and logs
+      description: Remove credentials and sensitive data before pasting logs.
+      render: text

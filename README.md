@@ -6,6 +6,20 @@ This extension enables [DuckDB](https://duckdb.org/) to read and query [Apache P
 
 Similar to other extensions, duckdb-paimon brings DuckDB's powerful local analytics to the Paimon data lake ecosystem.
 
+## Compatibility
+
+The following DuckDB release lines and platforms are supported. We recommend installing from the [DuckDB community repository](https://duckdb.org/community_extensions/extensions/paimon), following the [Install and Load](#install-and-load) instructions. Prebuilt bundles are also available from [GitHub Releases](https://github.com/polardb/duckdb-paimon/releases).
+
+| DuckDB | Branch | Linux x86_64 (glibc) | Linux ARM64 (glibc) | macOS ARM64 (Apple Silicon) |
+| --- | --- | --- | --- | --- |
+| 2.0 | `main` | ✅ | ✅ | ✅ |
+| 1.5 | `v1.5-variegata` | ✅ | ✅ | ✅ |
+| 1.4 | `v1.4-andium` | ✅ | ✅ | ✅ |
+
+Windows, Intel macOS, musl-based Linux (including Alpine), and WebAssembly builds are not currently provided.
+
+Extension binaries must match the [exact DuckDB version and platform](https://duckdb.org/docs/stable/extensions/extension_distribution#binary-compatibility). See the [community extension page](https://duckdb.org/community_extensions/extensions/paimon#compatibility-matrix) for available community builds, or check the GitHub release asset names when downloading bundles.
+
 ## About Apache Paimon
 
 [Apache Paimon](https://paimon.apache.org/) is a lake format that enables building a Realtime Lakehouse Architecture with Flink and Spark for both streaming and batch operations. It innovatively combines lake format and LSM structure, bringing realtime streaming updates into the lake architecture.
@@ -281,6 +295,8 @@ make test_debug
 ```
 
 ## Contributors
+
+See the [contributing guide](CONTRIBUTING.md) for how to report issues and submit pull requests.
 
 <a href="https://github.com/polardb/duckdb-paimon/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=polardb/duckdb-paimon" alt="Contributors to duckdb-paimon" />
