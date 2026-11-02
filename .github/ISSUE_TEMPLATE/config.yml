@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a Security Vulnerability
+    url: https://github.com/polardb/duckdb-paimon/security/advisories/new
+    about: Report security vulnerabilities privately to the maintainers.

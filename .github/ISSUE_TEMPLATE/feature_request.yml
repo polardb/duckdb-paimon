@@ -1,0 +1,31 @@
+name: Feature Request
+description: Propose an improvement to duckdb-paimon.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues for similar proposals. See the [contributing guide](https://github.com/polardb/duckdb-paimon/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What problem are you trying to solve? Describe the current limitation and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired behavior. Include example SQL or usage when helpful.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: Describe any alternatives you considered and their limitations.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include relevant versions, platforms, catalogs, storage backends, or related issues.
