@@ -516,7 +516,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: integral pruning retains resi
 	const vector<string> reversed {"eq", "ne", "gt", "ge", "lt", "le"};
 	for (idx_t operation = 0; operation < operations.size(); operation++) {
 		for (bool flip : {false, true}) {
-			auto bound = Bind(reader, warehouse, entry, "predicate_pruning");
+			auto bound = Bind(reader, warehouse, entry, "pruning");
 			LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 			// Projection position zero still denotes full-table field two.
 			get.AddColumnId(2);
