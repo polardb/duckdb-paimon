@@ -104,27 +104,30 @@ public:
 	}
 };
 
-static LogicalType PaimonPruningAtomType() {
+static LogicalType PaimonPredicateAtomType() {
 	return LogicalType::STRUCT(
 	    {{"op", LogicalType::VARCHAR}, {"field_index", LogicalType::INTEGER}, {"literal", LogicalType::BIGINT}});
 }
 
-static void AppendPaimonPruningAtoms(PaimonScanBindData &bind, const std::shared_ptr<paimon::Predicate> &predicate,
-                                     vector<Value> &atoms) {
+// All exported atoms are combined with AND; an OR subtree is omitted as a whole.
+static void AppendPaimonPredicateAtoms(PaimonScanBindData &bind, const std::shared_ptr<paimon::Predicate> &predicate,
+                                       vector<Value> &atoms) {
 	if (!predicate) {
 		return;
 	}
+
 	using FunctionType = paimon::Function::Type;
 	auto operation = predicate->GetFunction().GetType();
 	if (operation == FunctionType::AND) {
 		auto conjunction = dynamic_cast<const paimon::CompoundPredicate *>(predicate.get());
 		if (conjunction) {
 			for (auto &child : conjunction->Children()) {
-				AppendPaimonPruningAtoms(bind, child, atoms);
+				AppendPaimonPredicateAtoms(bind, child, atoms);
 			}
 		}
 		return;
 	}
+
 	const char *op;
 	switch (operation) {
 	case FunctionType::EQUAL:
@@ -149,15 +152,18 @@ static void AppendPaimonPruningAtoms(PaimonScanBindData &bind, const std::shared
 		// In particular, never extract a mandatory conjunct from inside an OR.
 		return;
 	}
+
 	auto leaf = dynamic_cast<const paimon::LeafPredicate *>(predicate.get());
 	if (!leaf || leaf->Literals().size() != 1 || leaf->Literals()[0].IsNull()) {
 		return;
 	}
+
 	auto native_type = leaf->GetFieldType();
 	if ((native_type != paimon::FieldType::INT && native_type != paimon::FieldType::BIGINT) ||
 	    leaf->Literals()[0].GetType() != native_type) {
 		return;
 	}
+
 	auto index = leaf->FieldIndex();
 	auto &types = bind.arrow_table.GetTypes();
 	if (index < 0 || static_cast<idx_t>(index) >= bind.field_names.size() ||
@@ -168,6 +174,7 @@ static void AppendPaimonPruningAtoms(PaimonScanBindData &bind, const std::shared
 	if (types[index] != duck_type) {
 		return;
 	}
+
 	// The tuple was checked against the bound full schema before dropping its
 	// redundant name/type. Ordinals are never positions in a projected reader.
 	int64_t literal = native_type == paimon::FieldType::INT ? leaf->Literals()[0].GetValue<int32_t>()
@@ -176,10 +183,11 @@ static void AppendPaimonPruningAtoms(PaimonScanBindData &bind, const std::shared
 	    {{"op", Value(op)}, {"field_index", Value::INTEGER(index)}, {"literal", Value::BIGINT(literal)}}));
 }
 
-// Bound the input shape before constructing any owned metadata Values. This is
-// not an allocation-byte quota: consumers must qualify their host/build's worst
-// case and debit it before invoking this callback. Unavailable metadata leaves
-// the original CPU read/error and residual-filter behavior intact.
+// Conservative export limits keep this optional metadata copy small: 1 MiB
+// caps copied text, while 64 options also caps per-entry Value overhead. The
+// 256-visit and depth-16 limits bound predicate work and recursive stack use.
+// These are export policy choices, not Paimon format limits or a byte quota.
+// Oversized/invalid identity is unavailable; oversized predicates only omit hints.
 struct PaimonMetadataCopyProfile {
 	static constexpr idx_t MAX_TEXT_BYTES = 1024 * 1024;
 	static constexpr idx_t MAX_OPTIONS = 64;
@@ -192,6 +200,7 @@ struct PaimonMetadataCopyProfile {
 		if (text.size() > text_left || !Utf8Proc::IsValid(text.data(), text.size())) {
 			return false;
 		}
+
 		text_left -= text.size();
 		return true;
 	}
@@ -200,11 +209,13 @@ struct PaimonMetadataCopyProfile {
 		if (!visits_left || depth > MAX_PREDICATE_DEPTH) {
 			return false;
 		}
+
 		--visits_left;
 		if (!predicate || predicate->GetFunction().GetType() != paimon::Function::Type::AND) {
 			// Atom extraction also treats OR and other opaque operations as leaves.
 			return true;
 		}
+
 		auto conjunction = dynamic_cast<const paimon::CompoundPredicate *>(predicate.get());
 		if (!conjunction) {
 			return true;
@@ -212,6 +223,7 @@ struct PaimonMetadataCopyProfile {
 		if (conjunction->Children().size() > visits_left) {
 			return false;
 		}
+
 		for (const auto &child : conjunction->Children()) {
 			if (!Predicate(child, depth + 1)) {
 				return false;
@@ -221,30 +233,38 @@ struct PaimonMetadataCopyProfile {
 	}
 };
 
+// Export owned Values from the retained binding without catalog/filesystem I/O.
+// Unversioned EXTERNAL metadata is unavailable and preserves the CPU/error path.
+// Recognized paimon.version=INTEGER 1 includes path/branch/schema_json, BIGINT
+// schema_id and snapshot_id, and native options. A NULL BIGINT snapshot means
+// readable empty at bind, never resolve-latest. schema_json retains stable field
+// IDs; predicate field_index is a full-schema ordinal, not a projection position.
+// Native options can contain credentials and must not be logged indiscriminately.
 static BindInfo PaimonScanBindInfo(TableFunctionGetBindInfoInput &input) {
 	BindInfo info(ScanType::EXTERNAL);
 	if (!input.bind_data) {
 		return info;
 	}
+
 	auto &bind = input.bind_data->Cast<PaimonScanBindData>();
 	if (bind.bound_read.deferred_error) {
 		// Unavailable metadata means keep the original CPU/error path, not empty.
 		return info;
 	}
+
 	auto &read = bind.bound_read;
 	PaimonMetadataCopyProfile profile;
 	if (read.options.size() > PaimonMetadataCopyProfile::MAX_OPTIONS || !profile.Text(read.table_data_path) ||
 	    !profile.Text(read.branch) || !profile.Text(read.table_schema_json)) {
 		return info;
 	}
+
 	for (const auto &entry : read.options) {
 		if (!profile.Text(entry.first) || !profile.Text(entry.second)) {
 			return info;
 		}
 	}
-	if (!profile.Predicate(bind.predicates)) {
-		return info;
-	}
+
 	info.InsertOption("paimon.version", Value::INTEGER(1));
 	info.InsertOption("paimon.path", Value(read.table_data_path));
 	info.InsertOption("paimon.branch", Value(read.branch));
@@ -252,6 +272,7 @@ static BindInfo PaimonScanBindInfo(TableFunctionGetBindInfoInput &input) {
 	info.InsertOption("paimon.schema_id", Value::BIGINT(read.read_schema_id));
 	info.InsertOption("paimon.snapshot_id",
 	                  read.snapshot_id ? Value::BIGINT(*read.snapshot_id) : Value(LogicalType::BIGINT));
+
 	vector<Value> options;
 	for (auto &entry : read.options) {
 		options.push_back(Value::STRUCT({{"key", Value(entry.first)}, {"value", Value(entry.second)}}));
@@ -259,9 +280,15 @@ static BindInfo PaimonScanBindInfo(TableFunctionGetBindInfoInput &input) {
 	info.InsertOption("paimon.options",
 	                  Value::LIST(LogicalType::STRUCT({{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}}),
 	                              std::move(options)));
+
+	// Predicate pruning may be incomplete; consumers must evaluate the full SQL
+	// filter. Preflight the entire shape before allocating atoms so overflow
+	// omits all hints without losing identity or traversing an unbounded suffix.
 	vector<Value> atoms;
-	AppendPaimonPruningAtoms(bind, bind.predicates, atoms);
-	info.InsertOption("paimon.pruning", Value::LIST(PaimonPruningAtomType(), std::move(atoms)));
+	if (profile.Predicate(bind.predicates)) {
+		AppendPaimonPredicateAtoms(bind, bind.predicates, atoms);
+	}
+	info.InsertOption("paimon.predicate_pruning", Value::LIST(PaimonPredicateAtomType(), std::move(atoms)));
 	return info;
 }
 

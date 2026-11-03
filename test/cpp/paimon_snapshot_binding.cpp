@@ -258,6 +258,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: identity and owned values",
 	auto info = ScanMetadata(reader, bound);
 	const auto snapshot = MetadataOption(info, "snapshot_id").GetValue<int64_t>();
 	REQUIRE(snapshot > 0);
+	REQUIRE(info.options.count("paimon.pruning") == 0);
 	REQUIRE(MetadataOption(info, "branch").GetValue<string>() == "main");
 	REQUIRE(MetadataOption(info, "path").GetValue<string>() == warehouse + "/race.db/t");
 	REQUIRE(MetadataOption(info, "schema_id").type() == LogicalType::BIGINT);
@@ -297,7 +298,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: identity and owned values",
 	expected_options["scan.mode"] = "from-snapshot-full";
 	expected_options["scan.snapshot-id"] = std::to_string(snapshot);
 	REQUIRE(retained_options == expected_options);
-	REQUIRE(ListValue::GetChildren(MetadataOption(info, "pruning")).empty());
+	REQUIRE(ListValue::GetChildren(MetadataOption(info, "predicate_pruning")).empty());
 	bound.data.reset();
 	empty.data.reset();
 	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20)");
@@ -362,8 +363,13 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: option count profile has an e
 TEST_CASE_METHOD(BindingFixture, "Paimon metadata: predicate copy traversal is bounded",
                  "[paimon][snapshot_binding][scan_metadata][metadata_profile]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto populated = GENERATE(false, true);
+	if (populated) {
+		SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	}
 	const auto deep = GENERATE(false, true);
 	auto bound = Bind(reader, warehouse, entry);
+	const auto identity = ScanMetadata(reader, bound);
 	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 	get.AddColumnId(0);
 	get.AddColumnId(1);
@@ -388,19 +394,29 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: predicate copy traversal is b
 	}
 	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
 	CHECK(filters.size() == (deep ? 1 : 300));
-	CHECK(ScanMetadata(reader, bound).options.empty());
-	// Retained residuals prohibit exact COUNT statistics even for this empty
-	// fixture. Metadata refusal must not change that existing CPU contract.
+	auto info = ScanMetadata(reader, bound);
+	for (const auto &option : identity.options) {
+		REQUIRE(info.options.count(option.first) == 1);
+		CHECK(Value::NotDistinctFrom(info.options.at(option.first), option.second));
+	}
+	CHECK(ListValue::GetChildren(MetadataOption(info, "predicate_pruning")).empty());
+	// Retained residuals prohibit exact COUNT statistics, including for an
+	// empty binding. Omitting hints must not change that existing CPU contract.
 	GetPartitionStatsInput stats_input(bound.function, *bound.data);
 	CHECK(bound.function.get_partition_stats(*reader.context, stats_input).empty());
-	ExpectRows(Read(reader, bound), {});
+	ExpectRows(Read(reader, bound), populated ? Rows {{Value(1), Value(10)}} : Rows {});
 }
 
 TEST_CASE_METHOD(BindingFixture, "Paimon metadata: exact predicate visit boundary",
                  "[paimon][snapshot_binding][metadata_profile_boundary]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto populated = GENERATE(false, true);
+	if (populated) {
+		SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	}
 	const auto over = GENERATE(false, true);
 	auto bound = Bind(reader, warehouse, entry);
+	const auto identity = ScanMetadata(reader, bound);
 	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 	get.AddColumnId(0);
 	get.AddColumnId(1);
@@ -416,19 +432,30 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: exact predicate visit boundar
 	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
 	CHECK(filters.size() == leaves);
 	auto info = ScanMetadata(reader, bound);
-	if (over) {
-		CHECK(info.options.empty());
-	} else {
-		CHECK(ListValue::GetChildren(MetadataOption(info, "pruning")).size() == leaves);
+	for (const auto &option : identity.options) {
+		if (option.first != "paimon.predicate_pruning") {
+			REQUIRE(info.options.count(option.first) == 1);
+			CHECK(Value::NotDistinctFrom(info.options.at(option.first), option.second));
+		}
 	}
-	ExpectRows(Read(reader, bound), {});
+	if (over) {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "predicate_pruning")).empty());
+	} else {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "predicate_pruning")).size() == leaves);
+	}
+	ExpectRows(Read(reader, bound), populated ? Rows {{Value(1), Value(10)}} : Rows {});
 }
 
 TEST_CASE_METHOD(BindingFixture, "Paimon metadata: exact predicate depth boundary",
                  "[paimon][snapshot_binding][metadata_profile_boundary]") {
 	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto populated = GENERATE(false, true);
+	if (populated) {
+		SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	}
 	const auto over = GENERATE(false, true);
 	auto bound = Bind(reader, warehouse, entry);
+	const auto identity = ScanMetadata(reader, bound);
 	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 	get.AddColumnId(0);
 	get.AddColumnId(1);
@@ -449,12 +476,18 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: exact predicate depth boundar
 	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
 	CHECK(filters.size() == 1);
 	auto info = ScanMetadata(reader, bound);
-	if (over) {
-		CHECK(info.options.empty());
-	} else {
-		CHECK(ListValue::GetChildren(MetadataOption(info, "pruning")).size() == depth + 1);
+	for (const auto &option : identity.options) {
+		if (option.first != "paimon.predicate_pruning") {
+			REQUIRE(info.options.count(option.first) == 1);
+			CHECK(Value::NotDistinctFrom(info.options.at(option.first), option.second));
+		}
 	}
-	ExpectRows(Read(reader, bound), {});
+	if (over) {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "predicate_pruning")).empty());
+	} else {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "predicate_pruning")).size() == depth + 1);
+	}
+	ExpectRows(Read(reader, bound), populated ? Rows {{Value(1), Value(10)}} : Rows {});
 }
 
 TEST_CASE_METHOD(BindingFixture, "Paimon metadata: deferred unsupported stays unavailable",
@@ -483,7 +516,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: integral pruning retains resi
 	const vector<string> reversed {"eq", "ne", "gt", "ge", "lt", "le"};
 	for (idx_t operation = 0; operation < operations.size(); operation++) {
 		for (bool flip : {false, true}) {
-			auto bound = Bind(reader, warehouse, entry, "pruning");
+			auto bound = Bind(reader, warehouse, entry, "predicate_pruning");
 			LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 			// Projection position zero still denotes full-table field two.
 			get.AddColumnId(2);
@@ -500,7 +533,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: integral pruning retains resi
 			REQUIRE(filters.size() == 1);
 			REQUIRE(filters[0]->ToString() == residual);
 			auto info = ScanMetadata(reader, bound);
-			auto &atoms = ListValue::GetChildren(MetadataOption(info, "pruning"));
+			auto &atoms = ListValue::GetChildren(MetadataOption(info, "predicate_pruning"));
 			REQUIRE(atoms.size() == 1);
 			auto &fields = StructValue::GetChildren(atoms[0]);
 			REQUIRE(fields[0] == Value(flip ? reversed[operation] : names[operation]));
@@ -533,7 +566,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: OR is never mandatory pruning
 	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
 	REQUIRE(filters.size() == (mixed ? 2 : 1));
 	auto info = ScanMetadata(reader, bound);
-	auto &atoms = ListValue::GetChildren(MetadataOption(info, "pruning"));
+	auto &atoms = ListValue::GetChildren(MetadataOption(info, "predicate_pruning"));
 	REQUIRE(atoms.size() == (mixed ? 1 : 0));
 	if (mixed) {
 		auto &fields = StructValue::GetChildren(atoms[0]);
@@ -578,7 +611,7 @@ TEST_CASE_METHOD(BindingFixture, "Paimon metadata: unsupported conjuncts retain 
 	REQUIRE(filters.size() == 2);
 	REQUIRE(filters[0]->ToString() == first_residual);
 	auto info = ScanMetadata(reader, bound);
-	const auto &atoms = ListValue::GetChildren(MetadataOption(info, "pruning"));
+	const auto &atoms = ListValue::GetChildren(MetadataOption(info, "predicate_pruning"));
 	REQUIRE(atoms.size() == 1);
 	const auto &fields = StructValue::GetChildren(atoms[0]);
 	REQUIRE(fields[0] == Value("eq"));
