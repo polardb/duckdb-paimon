@@ -1,0 +1,52 @@
+diff --git a/src/paimon/fs/s3/s3_file_system.cpp b/src/paimon/fs/s3/s3_file_system.cpp
+index b9b98f1e..02226224 100644
+--- a/src/paimon/fs/s3/s3_file_system.cpp
++++ b/src/paimon/fs/s3/s3_file_system.cpp
+@@ -805,12 +805,18 @@ class S3ObjectStoreClient : public ObjectStoreClient,
+         if (request_path.empty() || request_path.back() != '/') {
+             request_path += '/';
+         }
++        // Address buckets by virtual host unless asked otherwise, like the Java S3A client.
++        // Path style remains the fallback where a bucket subdomain cannot work: IP-literal
++        // endpoints, and dotted bucket names over HTTPS, because a `*.<host>` certificate does
++        // not cover a multi-label subdomain. HTTP endpoints keep addressing dotted buckets by
++        // virtual host, as they did before.
+         bool use_path_style =
+             path_style_ ||
+             (use_default_endpoint_
+                  ? !IsVirtualHostableS3Bucket(object.bucket, false)
+-                 : endpoint_.scheme != "http" || IsIpAddressAuthority(endpoint_.authority) ||
+-                       !IsVirtualHostableS3Bucket(object.bucket, true));
++                 : IsIpAddressAuthority(endpoint_.authority) ||
++                       !IsVirtualHostableS3Bucket(object.bucket,
++                                                  endpoint_.scheme == "http"));
+         if (use_path_style) {
+             request_path += UrlUtils::PercentEncode(object.bucket) + "/";
+         } else {
+diff --git a/src/paimon/fs/s3/s3_file_system_test.cpp b/src/paimon/fs/s3/s3_file_system_test.cpp
+index 822e1aed..80d643d9 100644
+--- a/src/paimon/fs/s3/s3_file_system_test.cpp
++++ b/src/paimon/fs/s3/s3_file_system_test.cpp
+@@ -158,10 +158,21 @@ TEST(S3ObjectStoreClientTest, TestCustomEndpointAddressing) {
+     ASSERT_OK_AND_ASSIGN(std::shared_ptr<ObjectStoreClient> https_client,
+                          MakeS3ObjectStoreClient(https_options, http));
+     ASSERT_OK(https_client->HeadObject({"bucket", "file"}));
+-    ASSERT_EQ(http->request_.url, "https://s3.example.com/bucket/file");
++    ASSERT_EQ(http->request_.url, "https://bucket.s3.example.com/file");
++    // Dotted bucket names keep path style over HTTPS: a `*.s3.example.com` certificate does
++    // not cover a multi-label subdomain such as `paimon.prod.data.s3.example.com`.
+     ASSERT_OK(https_client->HeadObject({"paimon.prod.data", "file"}));
+     ASSERT_EQ(http->request_.url, "https://s3.example.com/paimon.prod.data/file");
+ 
++    auto cos_options = StaticOptions();
++    cos_options[kS3EndpointOption] = "https://cos.ap-guangzhou.myqcloud.com";
++    cos_options[kS3PathStyleAccessOption] = "false";
++    ASSERT_OK_AND_ASSIGN(std::shared_ptr<ObjectStoreClient> cos_client,
++                         MakeS3ObjectStoreClient(cos_options, http));
++    ASSERT_OK(cos_client->HeadObject({"your-bucket-1250000000", "file"}));
++    ASSERT_EQ(http->request_.url,
++              "https://your-bucket-1250000000.cos.ap-guangzhou.myqcloud.com/file");
++
+     auto http_options = StaticOptions();
+     http_options[kS3EndpointOption] = "http://s3.example.com";
+     ASSERT_OK_AND_ASSIGN(std::shared_ptr<ObjectStoreClient> http_client,

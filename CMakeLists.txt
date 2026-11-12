@@ -27,15 +27,19 @@ set(PAIMON_CPP_LIB ${PAIMON_CPP_PREFIX}/lib64)
 file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 
 set(PAIMON_CPP_PATCHES
-    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch)
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-s3-virtual-host-addressing.patch
+)
 
-# Build patch command: apply each patch idempotently
+# Build patch command: apply each patch idempotently. Each reverse-check/apply
+# pair is parenthesized so a patch that fails to apply stops the build instead
+# of being masked by the next patch in the chain.
 set(PAIMON_CPP_PATCH_SCRIPT "")
 foreach(patch IN LISTS PAIMON_CPP_PATCHES)
   string(
     APPEND
     PAIMON_CPP_PATCH_SCRIPT
-    "git -C ${PAIMON_CPP_SOURCE_DIR} apply --reverse --check ${patch} 2>/dev/null || git -C ${PAIMON_CPP_SOURCE_DIR} apply ${patch} && "
+    "(git -C ${PAIMON_CPP_SOURCE_DIR} apply --reverse --check ${patch} 2>/dev/null || git -C ${PAIMON_CPP_SOURCE_DIR} apply ${patch}) && "
   )
 endforeach()
 string(APPEND PAIMON_CPP_PATCH_SCRIPT "true")

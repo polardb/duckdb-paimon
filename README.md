@@ -233,6 +233,30 @@ SELECT count(*) FROM s3_paimon.your_db.your_table;
 SELECT count(*) FROM paimon_scan('s3://your-bucket/warehouse/your_db.db/your_table');
 ```
 
+##### Tencent Cloud COS
+
+COS exposes an S3-compatible API, so connect to it through the `s3://` scheme and a COS endpoint. `key_id` is the Tencent Cloud SecretId, `secret` is the SecretKey, `region` is the COS region, and the bucket name keeps its APPID suffix:
+
+```sql
+CREATE SECRET my_cos (
+    TYPE paimon,
+    PROVIDER config,
+    key_id 'your-secret-id',
+    secret 'your-secret-key',
+    region 'ap-guangzhou',
+    endpoint 'https://cos.ap-guangzhou.myqcloud.com',
+    path_style_access false,
+    scope 's3://your-bucket-1250000000/warehouse'
+);
+
+ATTACH 's3://your-bucket-1250000000/warehouse' AS cos_paimon (TYPE paimon);
+SELECT count(*) FROM cos_paimon.your_db.your_table;
+
+SELECT count(*) FROM paimon_scan('s3://your-bucket-1250000000/warehouse/your_db.db/your_table');
+```
+
+The `endpoint` must carry the `https://` scheme. `path_style_access false` selects virtual-hosted-style addressing (`your-bucket-1250000000.cos.ap-guangzhou.myqcloud.com`), which COS requires for buckets created after January 1, 2024; the bundled `patches/paimon-cpp-s3-virtual-host-addressing.patch` makes virtual-hosted addressing the default for HTTPS endpoints. Bucket names containing dots are the exception: over HTTPS they keep path-style addressing, because a `*.<endpoint-host>` certificate does not cover a multi-label subdomain such as `name.with.dots.<endpoint-host>`. `path_style_access true` still forces path-style everywhere, and plain `http://` or IP-address endpoints are unaffected by this change. Tencent Cloud STS temporary keys take an additional `session_token '...'`.
+
 #### Through a REST Catalog
 
 Use a REST catalog when Paimon catalog metadata is served through the [Paimon REST Catalog API](https://paimon.apache.org/docs/master/concepts/rest/). The first `ATTACH` argument (`my_warehouse`) is sent to the REST server as its warehouse identifier; set it to the warehouse or instance your server expects. `rest_paimon` is only the local DuckDB catalog name.
