@@ -1051,8 +1051,8 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	}
 	std::optional<PaimonFastSnapshot> fast_snapshot;
 	const bool remote_path = IsRemotePaimonPath(read.table_data_path);
-	const bool cache_latest = !requested_snapshot && !timestamp && remote_path &&
-	                          read.branch == paimon::Identifier::kDefaultMainBranch;
+	const bool cache_latest =
+	    !requested_snapshot && !timestamp && remote_path && read.branch == paimon::Identifier::kDefaultMainBranch;
 	const auto cache_key = cache_latest
 	                           ? LatestSnapshotCacheKey(read.table_data_path, read.table_schema_json, paimon_options)
 	                           : std::string();
