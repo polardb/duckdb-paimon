@@ -25,8 +25,8 @@ FROM duckdb_functions()
 WHERE function_name IN ('paimon_scan', 'paimon_snapshots')
 ORDER BY function_name, length(parameters);
 ----
-paimon_scan	[table_path]	[debug_expected_splits, file_format, manifest_format, snapshot_from_id, snapshot_from_timestamp, table_path]
-paimon_scan	[warehouse, database, table]	[database, debug_expected_splits, file_format, manifest_format, snapshot_from_id, snapshot_from_timestamp, table, warehouse]
+paimon_scan	[table_path]	[debug_expected_splits, file_format, manifest_format, schema_json, snapshot_from_id, snapshot_from_timestamp, table_path]
+paimon_scan	[warehouse, database, table]	[database, debug_expected_splits, file_format, manifest_format, schema_json, snapshot_from_id, snapshot_from_timestamp, table, warehouse]
 paimon_snapshots	[table_path]	[manifest_format, table_path]
 paimon_snapshots	[warehouse, database, table]	[database, manifest_format, table, warehouse]
 
