@@ -23,6 +23,9 @@
  */
 
 #include "duckdb.hpp"
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
 #include "duckdb/common/constants.hpp"
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/function/table/arrow.hpp"
@@ -42,10 +45,13 @@
 #include "paimon_read_target.hpp"
 
 #include "paimon/api.h"
+#include "paimon/cache/cache.h"
 #include "paimon/catalog/identifier.h"
 #include "paimon/predicate/predicate_builder.h"
 #include "paimon/predicate/predicate_utils.h"
 #include "paimon/schema/schema.h"
+#include "paimon/fs/file_system.h"
+#include "paimon/fs/file_system_factory.h"
 
 #include <string>
 
@@ -80,6 +86,9 @@ public:
 
 	vector<string> part_keys;
 	std::vector<std::map<std::string, std::string>> part_filters;
+	// Snapshot metadata supplies an exact count for unfiltered COUNT(*), so the
+	// partition-stats path can skip planning manifests entirely.
+	std::optional<int64_t> exact_row_count;
 	// Debug-only test hook: assert the planned split count before any
 	// reader-level or DuckDB-level filtering can affect the result.
 	std::optional<idx_t> debug_expected_splits;
@@ -644,12 +653,21 @@ static void PaimonPushdownFilter(ClientContext &context, LogicalGet &get, Functi
 	}
 }
 
+static std::shared_ptr<paimon::Cache> GetPaimonScanCache() {
+	static auto cache = paimon::CreateLruCache(256LL * 1024 * 1024);
+	return cache;
+}
+
+static bool IsRemotePaimonPath(const std::string &path) {
+	return StringUtil::StartsWith(path, "s3://") || StringUtil::StartsWith(path, "oss://");
+}
+
 static paimon::Result<std::unique_ptr<paimon::TableScan>>
 CreatePaimonScanner(const string &path, const string &schema, const map<string, string> &options,
                     const std::shared_ptr<paimon::Predicate> &predicate = nullptr,
                     const std::vector<std::map<std::string, std::string>> &part_filters = {}) {
 	paimon::ScanContextBuilder builder(path);
-	builder.SetOptions(options).SetTableSchema(schema).SetPredicate(predicate);
+	builder.SetOptions(options).SetTableSchema(schema).SetPredicate(predicate).WithCache(GetPaimonScanCache());
 	if (!part_filters.empty()) {
 		builder.SetPartitionFilter(part_filters);
 	}
@@ -740,6 +758,202 @@ string PaimonFunctions::GetScanSchema(const FunctionData &data) {
 	return data.Cast<PaimonScanBindData>().ReadSchema();
 }
 
+struct PaimonFastSnapshot {
+	int64_t snapshot_id;
+	int64_t schema_id;
+	std::optional<int64_t> total_record_count;
+};
+
+namespace {
+constexpr std::chrono::seconds LATEST_SNAPSHOT_CACHE_TTL(30);
+constexpr size_t LATEST_SNAPSHOT_CACHE_MAX_ENTRIES = 64;
+
+struct LatestSnapshotCacheEntry {
+	PaimonFastSnapshot snapshot;
+	std::chrono::steady_clock::time_point checked_at;
+};
+
+std::mutex &LatestSnapshotCacheMutex() {
+	static std::mutex mutex;
+	return mutex;
+}
+
+std::unordered_map<std::string, LatestSnapshotCacheEntry> &LatestSnapshotCache() {
+	static std::unordered_map<std::string, LatestSnapshotCacheEntry> cache;
+	return cache;
+}
+
+std::string LatestSnapshotCacheKey(const std::string &path, const std::string &schema,
+                                   const std::map<std::string, std::string> &options) {
+	std::string key;
+	auto append = [&](const std::string &value) {
+		key += std::to_string(value.size());
+		key.push_back(':');
+		key += value;
+	};
+	append(path);
+	append(schema);
+	for (const auto &option : options) {
+		append(option.first);
+		append(option.second);
+	}
+	return key;
+}
+
+std::optional<PaimonFastSnapshot> GetLatestSnapshot(const std::string &key) {
+	std::lock_guard<std::mutex> guard(LatestSnapshotCacheMutex());
+	auto &cache = LatestSnapshotCache();
+	auto entry = cache.find(key);
+	if (entry == cache.end()) {
+		return std::nullopt;
+	}
+	if (std::chrono::steady_clock::now() - entry->second.checked_at >= LATEST_SNAPSHOT_CACHE_TTL) {
+		cache.erase(entry);
+		return std::nullopt;
+	}
+	return entry->second.snapshot;
+}
+
+void RememberLatestSnapshot(const std::string &key, PaimonFastSnapshot snapshot,
+                            std::chrono::steady_clock::time_point checked_at) {
+	std::lock_guard<std::mutex> guard(LatestSnapshotCacheMutex());
+	auto &cache = LatestSnapshotCache();
+	const auto existing = cache.find(key);
+	if (existing != cache.end() && existing->second.checked_at > checked_at) {
+		return;
+	}
+	for (auto entry = cache.begin(); entry != cache.end();) {
+		if (std::chrono::steady_clock::now() - entry->second.checked_at >= LATEST_SNAPSHOT_CACHE_TTL) {
+			entry = cache.erase(entry);
+		} else {
+			++entry;
+		}
+	}
+	if (cache.size() >= LATEST_SNAPSHOT_CACHE_MAX_ENTRIES && cache.find(key) == cache.end()) {
+		cache.erase(cache.begin());
+	}
+	cache.insert_or_assign(key, LatestSnapshotCacheEntry {snapshot, checked_at});
+}
+} // namespace
+
+static std::string TrimPaimonText(std::string value) {
+	size_t begin = 0;
+	while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) {
+		begin++;
+	}
+	size_t end = value.size();
+	while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+		end--;
+	}
+	return value.substr(begin, end - begin);
+}
+
+static std::string JoinPaimonPath(const std::string &base, const std::string &child) {
+	if (base.empty()) {
+		return child;
+	}
+	if (base.back() == '/') {
+		return base + child;
+	}
+	return base + "/" + child;
+}
+
+static bool ParsePaimonJsonInteger(const std::string &json, const std::string &key, int64_t *value) {
+	auto key_pos = json.find(key);
+	if (key_pos == std::string::npos) {
+		return false;
+	}
+	auto colon = json.find(':', key_pos + key.size());
+	if (colon == std::string::npos) {
+		return false;
+	}
+	size_t pos = colon + 1;
+	while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) {
+		pos++;
+	}
+	size_t start = pos;
+	while (pos < json.size() && std::isdigit(static_cast<unsigned char>(json[pos]))) {
+		pos++;
+	}
+	if (start == pos) {
+		return false;
+	}
+	auto parsed = PaimonSnapshotResolver::ParseInteger(json.substr(start, pos - start), key);
+	if (!parsed.ok()) {
+		return false;
+	}
+	*value = parsed.value();
+	return true;
+}
+
+// Read snapshot/LATEST (or snapshot-<requested>) and the tiny snapshot JSON
+// directly. This avoids listing every snapshot and fetching every snapshot
+// file when the catalog only needs one snapshot. Any failure returns nullopt so
+// the caller can fall back to the full catalog listing.
+static std::optional<PaimonFastSnapshot>
+TryReadPaimonSnapshotMetadata(const std::string &table_path, const std::map<std::string, std::string> &options,
+                              const std::optional<int64_t> &requested_snapshot) {
+	std::string identifier = "local";
+	if (table_path.rfind("s3://", 0) == 0) {
+		identifier = "s3";
+	} else if (table_path.rfind("oss://", 0) == 0) {
+		identifier = "oss";
+	}
+	auto file_system = paimon::FileSystemFactory::Get(identifier, table_path, options);
+	if (!file_system.ok()) {
+		return std::nullopt;
+	}
+	auto fs = std::move(file_system).value();
+
+	int64_t snapshot_id;
+	if (requested_snapshot) {
+		snapshot_id = *requested_snapshot;
+	} else {
+		std::string latest;
+		auto latest_status = fs->ReadFile(JoinPaimonPath(table_path, "snapshot/LATEST"), &latest);
+		if (!latest_status.ok()) {
+			return std::nullopt;
+		}
+		auto parsed = PaimonSnapshotResolver::ParseInteger(TrimPaimonText(std::move(latest)), "snapshot/LATEST");
+		if (!parsed.ok()) {
+			return std::nullopt;
+		}
+		snapshot_id = parsed.value();
+	}
+	if (snapshot_id <= 0) {
+		return std::nullopt;
+	}
+	if (!requested_snapshot) {
+		// LATEST is a hint and can lag a commit that already wrote snapshot-N+1.
+		// Match SnapshotManager::FindLatest: if the next snapshot exists, fall
+		// back to the full listing to find the true maximum.
+		auto next_exists =
+		    fs->Exists(JoinPaimonPath(table_path, "snapshot/snapshot-" + std::to_string(snapshot_id + 1)));
+		if (!next_exists.ok() || next_exists.value()) {
+			return std::nullopt;
+		}
+	}
+
+	std::string snapshot_json;
+	auto snapshot_path = JoinPaimonPath(table_path, "snapshot/snapshot-" + std::to_string(snapshot_id));
+	auto snapshot_status = fs->ReadFile(snapshot_path, &snapshot_json);
+	if (!snapshot_status.ok()) {
+		return std::nullopt;
+	}
+	int64_t parsed_id;
+	int64_t schema_id;
+	if (!ParsePaimonJsonInteger(snapshot_json, "\"id\"", &parsed_id) || parsed_id != snapshot_id ||
+	    !ParsePaimonJsonInteger(snapshot_json, "\"schemaId\"", &schema_id)) {
+		return std::nullopt;
+	}
+	std::optional<int64_t> total_record_count;
+	int64_t parsed_total;
+	if (ParsePaimonJsonInteger(snapshot_json, "\"totalRecordCount\"", &parsed_total) && parsed_total >= 0) {
+		total_record_count = parsed_total;
+	}
+	return PaimonFastSnapshot {snapshot_id, schema_id, total_record_count};
+}
+
 static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<PaimonScanBindData>();
@@ -752,6 +966,11 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	for (auto &entry : input.named_parameters) {
 		scan_options[entry.first.GetIdentifierName()] = entry.second;
 	}
+	std::optional<string> supplied_schema;
+	if (auto schema = scan_options.find("schema_json"); schema != scan_options.end()) {
+		supplied_schema = schema->second.ToString();
+		scan_options.erase(schema->first);
+	}
 	auto expected_splits = scan_options.find("debug_expected_splits");
 	if (expected_splits != scan_options.end()) {
 		auto expected_value = expected_splits->second.GetValue<int64_t>();
@@ -762,11 +981,20 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	}
 	auto paimon_options = PaimonCatalog::GetPaimonOptions(context, path.warehouse, scan_options);
 	auto paimon_catalog = PaimonCatalog::CreatePaimonCatalog(context, path.warehouse, scan_options);
-	auto target_result = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
-	if (!target_result.ok()) {
-		throw IOException(target_result.status().ToString());
-	}
-	auto target = std::move(target_result).value();
+	auto target = [&]() -> PaimonReadTarget {
+		if (supplied_schema) {
+			auto schema_result = paimon::CreateDataSchemaFromJson(*supplied_schema);
+			if (!schema_result.ok())
+				throw IOException(schema_result.status().ToString());
+			return PaimonReadTarget {paimon::Identifier(path.dbname, path.tablename),
+			                         paimon::Identifier(path.dbname, path.tablename),
+			                         paimon::Identifier::kDefaultMainBranch, std::move(schema_result).value()};
+		}
+		auto target_result = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
+		if (!target_result.ok())
+			throw IOException(target_result.status().ToString());
+		return std::move(target_result).value();
+	}();
 	auto table_path_result = paimon_catalog->GetTableLocation(target.schema_identifier);
 	if (!table_path_result.ok()) {
 		throw IOException(table_path_result.status().ToString());
@@ -780,6 +1008,10 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	if (!data_schema) {
 		throw BinderException("Paimon snapshot binding requires a data-table schema");
 	}
+	// Snapshot.totalRecordCount is an exact scan count for append-only tables.
+	// Primary-key tables can carry deletion state that the field does not
+	// account for, so leave them on the manifest-count path.
+	const bool append_only = data_schema->PrimaryKeys().empty();
 	auto &part_keys = data_schema->PartitionKeys();
 	bind_data->part_keys.assign(part_keys.begin(), part_keys.end());
 
@@ -823,26 +1055,87 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		}
 		read.deferred_error = scanner.status();
 	}
-	auto snapshots = PaimonSnapshotResolver::ListWithRetry(
-	    [&]() { return paimon_catalog->ListSnapshots(target.base_identifier, read.branch); });
-	if (!snapshots.ok()) {
-		throw IOException(snapshots.status().ToString());
+	std::optional<PaimonFastSnapshot> fast_snapshot;
+	const bool remote_path = IsRemotePaimonPath(read.table_data_path);
+	const bool cache_latest =
+	    !requested_snapshot && !timestamp && remote_path && read.branch == paimon::Identifier::kDefaultMainBranch;
+	const auto cache_key = cache_latest
+	                           ? LatestSnapshotCacheKey(read.table_data_path, read.table_schema_json, paimon_options)
+	                           : std::string();
+	if (cache_latest) {
+		fast_snapshot = GetLatestSnapshot(cache_key);
 	}
-	auto selected =
-	    PaimonSnapshotResolver::Resolve(snapshots.value(), requested_snapshot, timestamp, read.read_schema_id);
-	if (!selected.ok()) {
-		throw BinderException(selected.status().ToString());
+	if (remote_path && !timestamp && read.branch == paimon::Identifier::kDefaultMainBranch) {
+		if (!fast_snapshot) {
+			const auto checked_at = std::chrono::steady_clock::now();
+			fast_snapshot = TryReadPaimonSnapshotMetadata(read.table_data_path, paimon_options, requested_snapshot);
+			if (cache_latest && fast_snapshot && fast_snapshot->schema_id == read.read_schema_id) {
+				RememberLatestSnapshot(cache_key, *fast_snapshot, checked_at);
+			}
+		}
 	}
-	read.snapshot_id = selected.value();
-	auto checked_target = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
-	auto checked_path = paimon_catalog->GetTableLocation(target.schema_identifier);
-	if (!checked_target.ok() || !checked_path.ok()) {
-		throw BinderException("Paimon table changed or became unavailable during binding; retry the query");
+	if (fast_snapshot) {
+		// For the default latest scan the fast path's schema id must match the
+		// supplied/bound schema. An older explicit snapshot may legitimately have
+		// an older schema, so only reject a snapshot schema that is newer.
+		if (fast_snapshot->schema_id > read.read_schema_id) {
+			throw BinderException("Paimon snapshot schema is newer than the bound schema; retry the query");
+		}
+		if (!requested_snapshot && fast_snapshot->schema_id != read.read_schema_id) {
+			fast_snapshot.reset();
+		}
 	}
-	auto checked_json = checked_target.value().schema->GetJsonSchema();
-	if (checked_target.value().branch != read.branch || !checked_json.ok() ||
-	    checked_json.value() != read.table_schema_json || checked_path.value() != read.table_data_path) {
-		throw BinderException("Paimon table schema or location changed during binding; retry the query");
+	bool snapshot_identity_verified = false;
+	if (fast_snapshot) {
+		read.snapshot_id = fast_snapshot->snapshot_id;
+		if (append_only && remote_path) {
+			bind_data->exact_row_count = fast_snapshot->total_record_count;
+		}
+		snapshot_identity_verified = fast_snapshot->schema_id == read.read_schema_id;
+	} else {
+		auto snapshots = PaimonSnapshotResolver::ListWithRetry(
+		    [&]() { return paimon_catalog->ListSnapshots(target.base_identifier, read.branch); });
+		if (!snapshots.ok()) {
+			throw IOException(snapshots.status().ToString());
+		}
+		auto selected =
+		    PaimonSnapshotResolver::Resolve(snapshots.value(), requested_snapshot, timestamp, read.read_schema_id);
+		if (!selected.ok()) {
+			throw BinderException(selected.status().ToString());
+		}
+		read.snapshot_id = selected.value();
+		snapshot_identity_verified = !selected.value();
+		if (selected.value()) {
+			for (const auto &snapshot : snapshots.value()) {
+				if (snapshot.snapshot_id == *selected.value()) {
+					snapshot_identity_verified = snapshot.schema_id == read.read_schema_id;
+					if (append_only && remote_path && snapshot.total_record_count &&
+					    *snapshot.total_record_count >= 0) {
+						bind_data->exact_row_count = *snapshot.total_record_count;
+					}
+					break;
+				}
+			}
+		} else if (append_only && remote_path) {
+			bind_data->exact_row_count = 0;
+		}
+	}
+	// Only a caller-supplied schema can skip the second full schema read: it
+	// already states the schema this bind must use and the snapshot id pins the
+	// scan. Without it, keep the original verification, including its catalog
+	// requests, so REST and local bindings retain their observable behavior.
+	const bool supplied_schema_verified = supplied_schema.has_value() && snapshot_identity_verified;
+	if (!supplied_schema_verified) {
+		auto checked_target = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
+		auto checked_path = paimon_catalog->GetTableLocation(target.schema_identifier);
+		if (!checked_target.ok() || !checked_path.ok()) {
+			throw BinderException("Paimon table changed or became unavailable during binding; retry the query");
+		}
+		auto checked_json = checked_target.value().schema->GetJsonSchema();
+		if (checked_target.value().branch != read.branch || !checked_json.ok() ||
+		    checked_json.value() != read.table_schema_json || checked_path.value() != read.table_data_path) {
+			throw BinderException("Paimon table schema or location changed during binding; retry the query");
+		}
 	}
 	if (read.snapshot_id) {
 		read.options["scan.mode"] = "from-snapshot-full";
@@ -891,10 +1184,79 @@ struct PaimonScanGlobalState : public GlobalTableFunctionState {
 	}
 };
 
+// Planning re-reads the snapshot, manifest list and manifests from storage on
+// every execution: a view expands its table function again for each statement
+// and the bind data is not statement-cached. Repeat scans of the same immutable
+// snapshot can therefore reuse the splits, which are pure descriptions.
+namespace {
+constexpr size_t SPLIT_CACHE_MAX_ENTRIES = 64;
+constexpr std::chrono::seconds SPLIT_CACHE_TTL(30);
+
+struct SplitCacheEntry {
+	std::vector<std::shared_ptr<paimon::Split>> splits;
+	std::chrono::steady_clock::time_point stored_at;
+};
+
+std::mutex &SplitCacheMutex() {
+	static std::mutex mutex;
+	return mutex;
+}
+
+std::unordered_map<std::string, SplitCacheEntry> &SplitCache() {
+	static std::unordered_map<std::string, SplitCacheEntry> cache;
+	return cache;
+}
+
+void AppendCacheToken(std::string &key, const std::string &value) {
+	key.push_back('\0');
+	key += std::to_string(value.size());
+	key.push_back(':');
+	key += value;
+}
+
+std::string SplitCacheKey(const PaimonScanBindData &bind) {
+	std::string key = bind.ReadPath();
+	key.push_back('\0');
+	key += bind.ReadBranch();
+	key.push_back('\0');
+	key += bind.bound_read.snapshot_id ? std::to_string(*bind.bound_read.snapshot_id) : "none";
+	key.push_back('\0');
+	AppendCacheToken(key, bind.ReadSchema());
+	for (const auto &entry : bind.ReadOptions()) {
+		AppendCacheToken(key, entry.first);
+		AppendCacheToken(key, entry.second);
+	}
+	AppendCacheToken(key, bind.predicates ? bind.predicates->ToString() : std::string());
+	for (const auto &filter : bind.part_filters) {
+		for (const auto &entry : filter) {
+			AppendCacheToken(key, entry.first);
+			AppendCacheToken(key, entry.second);
+		}
+	}
+	return key;
+}
+} // namespace
+
 static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const PaimonScanBindData &bind) {
 	bind.CheckReadable();
 	if (!bind.bound_read.snapshot_id) {
 		return {};
+	}
+	// Splits are pure descriptions of one immutable remote snapshot. Local scans
+	// keep planning so snapshot/manifest removal is detected on every read.
+	const bool cache_splits = IsRemotePaimonPath(bind.ReadPath());
+	const std::string cache_key = cache_splits ? SplitCacheKey(bind) : std::string();
+	if (cache_splits) {
+		std::lock_guard<std::mutex> guard(SplitCacheMutex());
+		auto &cache = SplitCache();
+		auto entry = cache.find(cache_key);
+		if (entry != cache.end()) {
+			auto age = std::chrono::steady_clock::now() - entry->second.stored_at;
+			if (age <= SPLIT_CACHE_TTL) {
+				return entry->second.splits;
+			}
+			cache.erase(entry);
+		}
 	}
 	auto plan =
 	    CreatePaimonPlan(bind.ReadPath(), bind.ReadSchema(), bind.ReadOptions(), bind.predicates, bind.part_filters);
@@ -904,8 +1266,24 @@ static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const 
 	if (plan.value()->SnapshotId() != bind.bound_read.snapshot_id) {
 		throw IOException("Paimon scan no longer resolves to its bound snapshot");
 	}
-
-	return plan.value()->Splits();
+	auto splits = plan.value()->Splits();
+	if (cache_splits) {
+		auto now = std::chrono::steady_clock::now();
+		std::lock_guard<std::mutex> guard(SplitCacheMutex());
+		auto &cache = SplitCache();
+		for (auto it = cache.begin(); it != cache.end();) {
+			if (now - it->second.stored_at > SPLIT_CACHE_TTL) {
+				it = cache.erase(it);
+			} else {
+				++it;
+			}
+		}
+		if (cache.size() >= SPLIT_CACHE_MAX_ENTRIES) {
+			cache.erase(cache.begin());
+		}
+		cache.emplace(cache_key, SplitCacheEntry {splits, now});
+	}
+	return splits;
 }
 
 struct PaimonScanLocalState : public LocalTableFunctionState {
@@ -992,6 +1370,7 @@ private:
 
 		paimon::ReadContextBuilder read_context_builder(global_state.path);
 		auto read_context_result = read_context_builder.WithBranch(bind_data.ReadBranch())
+		                               .WithCache(GetPaimonScanCache())
 		                               .SetOptions(bind_data.ReadOptions())
 		                               .SetTableSchema(bind_data.ReadSchema())
 		                               .SetReadFieldNames(read_field_names)
@@ -1066,6 +1445,18 @@ static vector<PartitionStatistics> PaimonGetPartitionStats(ClientContext &, GetP
 	// Only expose exact counts for unfiltered scans, where DuckDB can safely replace
 	// COUNT(*) with a constant.
 	if (bind.predicates != nullptr || !bind.part_filters.empty()) {
+		return result;
+	}
+
+	// A remote bound snapshot already carries its exact row count. COUNT(*) is
+	// unfiltered here, so this is the same number the manifest planner would
+	// count, without reading any manifests. Local scans keep planning so a
+	// removed snapshot or manifest is reported.
+	if (bind.exact_row_count.has_value()) {
+		PartitionStatistics stats;
+		stats.count = NumericCast<idx_t>(*bind.exact_row_count);
+		stats.count_type = CountType::COUNT_EXACT;
+		result.push_back(std::move(stats));
 		return result;
 	}
 
@@ -1191,6 +1582,7 @@ static void AddPaimonScanThreePartFunction(CreateTableFunctionInfo &info) {
 		options.Add("file_format", LogicalType::VARCHAR);     // deprecated: auto-detected from table schema
 		options.Add("snapshot_from_id", LogicalType::BIGINT);
 		options.Add("snapshot_from_timestamp", LogicalType::TIMESTAMP);
+		options.Add("schema_json", LogicalType::VARCHAR);
 		// Debug-only test hook, not part of the public paimon_scan API.
 		options.Add("debug_expected_splits", LogicalType::BIGINT);
 	});
@@ -1219,6 +1611,7 @@ static void AddPaimonScanFullPathFunction(CreateTableFunctionInfo &info) {
 		options.Add("file_format", LogicalType::VARCHAR);     // deprecated
 		options.Add("snapshot_from_id", LogicalType::BIGINT);
 		options.Add("snapshot_from_timestamp", LogicalType::TIMESTAMP);
+		options.Add("schema_json", LogicalType::VARCHAR);
 		// Debug-only test hook, not part of the public paimon_scan API.
 		options.Add("debug_expected_splits", LogicalType::BIGINT);
 	});
