@@ -103,7 +103,8 @@ On S3 and OSS, repeated scans of the latest snapshot reuse its verified identity
 for up to 30 seconds per process. A newly committed snapshot may therefore take
 up to 30 seconds to appear in ordinary latest-snapshot queries. Local scans and
 queries selecting an explicit snapshot or timestamp continue to resolve the
-requested version on every bind. Applications that already have a table schema
+requested version on every bind. Local scans also re-plan on every read, so a
+removed snapshot or manifest is detected immediately. Applications that already have a table schema
 may pass `schema_json` to `paimon_scan` to avoid loading it from the catalog at
 bind time; the supplied schema must match the table.
 
