@@ -34,6 +34,7 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "catch.hpp"
@@ -166,6 +167,19 @@ static void ExpectRows(const Rows &actual, const Rows &expected) {
 	}
 }
 
+static BindInfo ScanMetadata(Connection &reader, BoundScan &bound) {
+	INFO("the registered scan must expose metadata without a custom reader API");
+	REQUIRE(bound.function.get_bind_info != nullptr);
+	TableFunctionGetBindInfoInput input(*reader.context, bound.data.get());
+	return bound.function.get_bind_info(input);
+}
+
+static const Value &MetadataOption(const BindInfo &info, const string &key) {
+	auto entry = info.options.find("paimon." + key);
+	REQUIRE(entry != info.options.end());
+	return entry->second;
+}
+
 static void PushEqual(Connection &reader, BoundScan &bound, idx_t column, int value) {
 	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
 	for (idx_t i = 0; i < bound.types.size(); i++) {
@@ -230,6 +244,371 @@ struct BindingFixture {
 		SQL(writer, "CREATE TABLE pm.race.t (id INTEGER, value INTEGER)");
 	}
 };
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: identity and owned values",
+                 "[paimon][snapshot_binding][scan_metadata]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	auto empty = Bind(reader, warehouse, entry);
+	auto empty_info = ScanMetadata(reader, empty);
+	REQUIRE(MetadataOption(empty_info, "version").GetValue<int32_t>() == 1);
+	REQUIRE(MetadataOption(empty_info, "snapshot_id").type() == LogicalType::BIGINT);
+	REQUIRE(MetadataOption(empty_info, "snapshot_id").IsNull());
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	auto bound = Bind(reader, warehouse, entry);
+	auto info = ScanMetadata(reader, bound);
+	const auto snapshot = MetadataOption(info, "snapshot_id").GetValue<int64_t>();
+	REQUIRE(snapshot > 0);
+	REQUIRE(MetadataOption(info, "branch").GetValue<string>() == "main");
+	REQUIRE(MetadataOption(info, "path").GetValue<string>() == warehouse + "/race.db/t");
+	REQUIRE(MetadataOption(info, "schema_id").type() == LogicalType::BIGINT);
+	REQUIRE(MetadataOption(info, "schema_id") == Value::BIGINT(0));
+	const auto retained_schema = MetadataOption(info, "schema_json").GetValue<string>();
+	REQUIRE(
+	    PaimonFunctions::GetColumnSignature(retained_schema) ==
+	    PaimonFunctions::GetColumnSignature(
+	        R"({"fields":[{"id":0,"name":"id","type":"INT"},{"id":1,"name":"value","type":"INT"}],"primaryKeys":[],"partitionKeys":[]})"));
+	const auto option_type =
+	    LogicalType::LIST(LogicalType::STRUCT({{"key", LogicalType::VARCHAR}, {"value", LogicalType::VARCHAR}}));
+	REQUIRE(MetadataOption(info, "options").type() == option_type);
+	map<string, string> retained_options;
+	for (const auto &option : ListValue::GetChildren(MetadataOption(info, "options"))) {
+		const auto &fields = StructValue::GetChildren(option);
+		REQUIRE(retained_options.emplace(fields[0].GetValue<string>(), fields[1].GetValue<string>()).second);
+	}
+	using namespace duckdb_yyjson;
+	std::ifstream schema_file(warehouse + "/race.db/t/schema/schema-0");
+	const string schema_bytes((std::istreambuf_iterator<char>(schema_file)), std::istreambuf_iterator<char>());
+	std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> schema_doc(
+	    yyjson_read(schema_bytes.data(), schema_bytes.size(), 0), yyjson_doc_free);
+	REQUIRE(schema_doc);
+	map<string, string> expected_options;
+	auto native_options = yyjson_obj_get(yyjson_doc_get_root(schema_doc.get()), "options");
+	REQUIRE(yyjson_is_obj(native_options));
+	yyjson_obj_iter iter;
+	yyjson_obj_iter_init(native_options, &iter);
+	while (auto key = yyjson_obj_iter_next(&iter)) {
+		auto value = yyjson_obj_iter_get_val(key);
+		REQUIRE(yyjson_is_str(value));
+		expected_options.emplace(yyjson_get_str(key), yyjson_get_str(value));
+	}
+	expected_options["file-system"] = "local";
+	expected_options["read.batch-size"] = std::to_string(STANDARD_VECTOR_SIZE);
+	expected_options["branch"] = "main";
+	expected_options["scan.mode"] = "from-snapshot-full";
+	expected_options["scan.snapshot-id"] = std::to_string(snapshot);
+	REQUIRE(retained_options == expected_options);
+	REQUIRE(ListValue::GetChildren(MetadataOption(info, "pruning")).empty());
+	bound.data.reset();
+	empty.data.reset();
+	SQL(writer, "INSERT INTO pm.race.t VALUES (2,20)");
+	REQUIRE(MetadataOption(empty_info, "snapshot_id").IsNull());
+	REQUIRE(MetadataOption(info, "snapshot_id").GetValue<int64_t>() == snapshot);
+	REQUIRE(MetadataOption(info, "branch").GetValue<string>() == "main");
+	REQUIRE(MetadataOption(info, "path").GetValue<string>() == warehouse + "/race.db/t");
+	REQUIRE(MetadataOption(info, "schema_id") == Value::BIGINT(0));
+	REQUIRE(MetadataOption(info, "schema_json").GetValue<string>() == retained_schema);
+	map<string, string> after_options;
+	for (const auto &option : ListValue::GetChildren(MetadataOption(info, "options"))) {
+		const auto &fields = StructValue::GetChildren(option);
+		REQUIRE(after_options.emplace(fields[0].GetValue<string>(), fields[1].GetValue<string>()).second);
+	}
+	REQUIRE(after_options == expected_options);
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: oversized copy profile preserves CPU reads",
+                 "[paimon][snapshot_binding][scan_metadata][metadata_profile]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	// Binding and ordinary CPU execution are outside the metadata-copy profile.
+	// A large, otherwise harmless native option must decline metadata before it
+	// becomes a second owned Value payload, rather than truncate it or imply EOF.
+	const string padding(1024 * 1024, 'x');
+	SQL(writer, "CREATE TABLE pm.race.large_metadata (id INTEGER) WITH ('test.metadata.padding'=" +
+	                Value(padding).ToSQLString() + ")");
+	SQL(writer, "INSERT INTO pm.race.large_metadata VALUES (7)");
+	auto bound = Bind(reader, warehouse, entry, "large_metadata");
+	auto info = ScanMetadata(reader, bound);
+	INFO("oversized metadata must be unavailable, not a partial versioned payload");
+	CHECK(info.options.empty());
+	CHECK(Count(reader, bound) == 1);
+	ExpectRows(Read(reader, bound), {{Value(7)}});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: option count profile has an exact boundary",
+                 "[paimon][snapshot_binding][scan_metadata][metadata_profile]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto over = GENERATE(false, true);
+	auto baseline = Bind(reader, warehouse, entry);
+	const auto defaults = ListValue::GetChildren(MetadataOption(ScanMetadata(reader, baseline), "options")).size();
+	REQUIRE(defaults < 64);
+	string options;
+	for (idx_t i = 0; i < 64 - defaults + (over ? 1 : 0); ++i) {
+		if (i) {
+			options += ",";
+		}
+		options += "'test.metadata.option_" + std::to_string(i) + "'='x'";
+	}
+	SQL(writer, "CREATE TABLE pm.race.option_profile (id INTEGER) WITH (" + options + ")");
+	auto bound = Bind(reader, warehouse, entry, "option_profile");
+	auto info = ScanMetadata(reader, bound);
+	if (over) {
+		CHECK(info.options.empty());
+	} else {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "options")).size() == 64);
+	}
+	CHECK(Count(reader, bound) == 0);
+	ExpectRows(Read(reader, bound), {});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: predicate copy traversal is bounded",
+                 "[paimon][snapshot_binding][scan_metadata][metadata_profile]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto deep = GENERATE(false, true);
+	auto bound = Bind(reader, warehouse, entry);
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
+	get.AddColumnId(0);
+	get.AddColumnId(1);
+	auto equal = [&]() {
+		return BoundComparisonExpression::Create(
+		    ExpressionType::COMPARE_EQUAL,
+		    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))),
+		    make_uniq<BoundConstantExpression>(Value(1)));
+	};
+	vector<unique_ptr<Expression>> filters;
+	if (deep) {
+		unique_ptr<Expression> expression = equal();
+		for (idx_t i = 0; i < 32; ++i) {
+			expression =
+			    make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND, std::move(expression), equal());
+		}
+		filters.push_back(std::move(expression));
+	} else {
+		for (idx_t i = 0; i < 300; ++i) {
+			filters.push_back(equal());
+		}
+	}
+	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
+	CHECK(filters.size() == (deep ? 1 : 300));
+	CHECK(ScanMetadata(reader, bound).options.empty());
+	// Retained residuals prohibit exact COUNT statistics even for this empty
+	// fixture. Metadata refusal must not change that existing CPU contract.
+	GetPartitionStatsInput stats_input(bound.function, *bound.data);
+	CHECK(bound.function.get_partition_stats(*reader.context, stats_input).empty());
+	ExpectRows(Read(reader, bound), {});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: exact predicate visit boundary",
+                 "[paimon][snapshot_binding][metadata_profile_boundary]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto over = GENERATE(false, true);
+	auto bound = Bind(reader, warehouse, entry);
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
+	get.AddColumnId(0);
+	get.AddColumnId(1);
+	vector<unique_ptr<Expression>> filters;
+	// One native AND plus its 255 leaves consumes exactly 256 visits.
+	const idx_t leaves = over ? 256 : 255;
+	for (idx_t i = 0; i < leaves; ++i) {
+		filters.push_back(BoundComparisonExpression::Create(
+		    ExpressionType::COMPARE_EQUAL,
+		    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))),
+		    make_uniq<BoundConstantExpression>(Value(1))));
+	}
+	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
+	CHECK(filters.size() == leaves);
+	auto info = ScanMetadata(reader, bound);
+	if (over) {
+		CHECK(info.options.empty());
+	} else {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "pruning")).size() == leaves);
+	}
+	ExpectRows(Read(reader, bound), {});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: exact predicate depth boundary",
+                 "[paimon][snapshot_binding][metadata_profile_boundary]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto over = GENERATE(false, true);
+	auto bound = Bind(reader, warehouse, entry);
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
+	get.AddColumnId(0);
+	get.AddColumnId(1);
+	auto equal = [&]() {
+		return BoundComparisonExpression::Create(
+		    ExpressionType::COMPARE_EQUAL,
+		    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))),
+		    make_uniq<BoundConstantExpression>(Value(1)));
+	};
+	const idx_t depth = over ? 17 : 16;
+	unique_ptr<Expression> expression = equal();
+	for (idx_t i = 0; i < depth; ++i) {
+		expression =
+		    make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND, std::move(expression), equal());
+	}
+	vector<unique_ptr<Expression>> filters;
+	filters.push_back(std::move(expression));
+	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
+	CHECK(filters.size() == 1);
+	auto info = ScanMetadata(reader, bound);
+	if (over) {
+		CHECK(info.options.empty());
+	} else {
+		CHECK(ListValue::GetChildren(MetadataOption(info, "pruning")).size() == depth + 1);
+	}
+	ExpectRows(Read(reader, bound), {});
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: deferred unsupported stays unavailable",
+                 "[paimon][snapshot_binding][scan_metadata]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	SQL(writer, "CREATE TABLE pm.race.unsupported_metadata (id INTEGER PRIMARY KEY)");
+	auto bound = Bind(reader, warehouse, entry, "unsupported_metadata");
+	auto info = ScanMetadata(reader, bound);
+	REQUIRE(info.options.empty());
+	REQUIRE_THROWS_WITH(Read(reader, bound), Catch::Contains("do not support pk table bucket=-1"));
+	REQUIRE_THROWS_WITH(Count(reader, bound), Catch::Contains("do not support pk table bucket=-1"));
+	SQL(reader, "EXPLAIN SELECT * FROM pm.race.unsupported_metadata");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: integral pruning retains residuals and full ordinals",
+                 "[paimon][snapshot_binding][scan_metadata]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto big = GENERATE(false, true);
+	SQL(writer,
+	    "CREATE TABLE pm.race.pruning (label VARCHAR, pad INTEGER, value " + string(big ? "BIGINT" : "INTEGER") + ")");
+	const vector<ExpressionType> operations {
+	    ExpressionType::COMPARE_EQUAL,       ExpressionType::COMPARE_NOTEQUAL,
+	    ExpressionType::COMPARE_LESSTHAN,    ExpressionType::COMPARE_LESSTHANOREQUALTO,
+	    ExpressionType::COMPARE_GREATERTHAN, ExpressionType::COMPARE_GREATERTHANOREQUALTO};
+	const vector<string> names {"eq", "ne", "lt", "le", "gt", "ge"};
+	const vector<string> reversed {"eq", "ne", "gt", "ge", "lt", "le"};
+	for (idx_t operation = 0; operation < operations.size(); operation++) {
+		for (bool flip : {false, true}) {
+			auto bound = Bind(reader, warehouse, entry, "pruning");
+			LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
+			// Projection position zero still denotes full-table field two.
+			get.AddColumnId(2);
+			unique_ptr<Expression> column =
+			    make_uniq<BoundColumnRefExpression>(bound.types[2], ColumnBinding(TableIndex(0), ProjectionIndex(0)));
+			auto value = big ? Value::BIGINT(INT64_MIN) : Value::INTEGER(INT32_MIN);
+			unique_ptr<Expression> literal = make_uniq<BoundConstantExpression>(value);
+			vector<unique_ptr<Expression>> filters;
+			filters.push_back(BoundComparisonExpression::Create(operations[operation],
+			                                                    flip ? std::move(literal) : std::move(column),
+			                                                    flip ? std::move(column) : std::move(literal)));
+			const auto residual = filters[0]->ToString();
+			bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
+			REQUIRE(filters.size() == 1);
+			REQUIRE(filters[0]->ToString() == residual);
+			auto info = ScanMetadata(reader, bound);
+			auto &atoms = ListValue::GetChildren(MetadataOption(info, "pruning"));
+			REQUIRE(atoms.size() == 1);
+			auto &fields = StructValue::GetChildren(atoms[0]);
+			REQUIRE(fields[0] == Value(flip ? reversed[operation] : names[operation]));
+			REQUIRE(fields[1] == Value::INTEGER(2));
+			REQUIRE(fields[2] == Value::BIGINT(big ? INT64_MIN : INT32_MIN));
+		}
+	}
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: OR is never mandatory pruning",
+                 "[paimon][snapshot_binding][scan_metadata]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto mixed = GENERATE(false, true);
+	auto bound = Bind(reader, warehouse, entry);
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
+	get.AddColumnId(0);
+	get.AddColumnId(1);
+	auto equal = [&](idx_t column, int value) {
+		return BoundComparisonExpression::Create(
+		    ExpressionType::COMPARE_EQUAL,
+		    make_uniq<BoundColumnRefExpression>(bound.types[column],
+		                                        ColumnBinding(TableIndex(0), ProjectionIndex(column))),
+		    make_uniq<BoundConstantExpression>(Value(value)));
+	};
+	vector<unique_ptr<Expression>> filters;
+	filters.push_back(make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR, equal(0, 1), equal(1, 20)));
+	if (mixed) {
+		filters.push_back(equal(1, 30));
+	}
+	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
+	REQUIRE(filters.size() == (mixed ? 2 : 1));
+	auto info = ScanMetadata(reader, bound);
+	auto &atoms = ListValue::GetChildren(MetadataOption(info, "pruning"));
+	REQUIRE(atoms.size() == (mixed ? 1 : 0));
+	if (mixed) {
+		auto &fields = StructValue::GetChildren(atoms[0]);
+		REQUIRE(fields[1] == Value::INTEGER(1));
+		REQUIRE(fields[2] == Value::BIGINT(30));
+	}
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: unsupported conjuncts retain residuals",
+                 "[paimon][snapshot_binding][scan_metadata]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const auto kind = GENERATE(0, 1, 2);
+	SQL(writer, "CREATE TABLE pm.race.unsupported_pruning (id INTEGER, label VARCHAR)");
+	auto bound = Bind(reader, warehouse, entry, "unsupported_pruning");
+	LogicalGet get(TableIndex(0), bound.function, nullptr, bound.types, bound.names);
+	get.AddColumnId(0);
+	get.AddColumnId(1);
+	const idx_t column = kind == 0 ? 1 : 0;
+	auto literal = kind == 0 ? Value("text") : kind == 1 ? Value(LogicalType::INTEGER) : Value::BIGINT(INT64_MAX);
+	vector<unique_ptr<Expression>> filters;
+	filters.push_back(BoundComparisonExpression::Create(
+	    ExpressionType::COMPARE_EQUAL,
+	    make_uniq<BoundColumnRefExpression>(bound.types[column], ColumnBinding(TableIndex(0), ProjectionIndex(column))),
+	    make_uniq<BoundConstantExpression>(literal)));
+	filters.push_back(BoundComparisonExpression::Create(
+	    ExpressionType::COMPARE_EQUAL,
+	    make_uniq<BoundColumnRefExpression>(bound.types[0], ColumnBinding(TableIndex(0), ProjectionIndex(0))),
+	    make_uniq<BoundConstantExpression>(Value(7))));
+	const auto first_residual = filters[0]->ToString();
+	if (kind != 0) {
+		// These manually constructed callback inputs bypass SQL binder casts and
+		// NULL simplification. Preserve the existing native boundary errors;
+		// they are not successful pruning or empty-result evidence.
+		REQUIRE_THROWS_WITH(bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters),
+		                    Catch::Contains(kind == 1 ? "literal cannot be NULL" : "out of range"));
+		REQUIRE(filters.size() == 2);
+		REQUIRE(filters[0]->ToString() == first_residual);
+		SQL(reader, "SELECT 42");
+		return;
+	}
+	bound.function.pushdown_complex_filter(*reader.context, get, bound.data.get(), filters);
+	REQUIRE(filters.size() == 2);
+	REQUIRE(filters[0]->ToString() == first_residual);
+	auto info = ScanMetadata(reader, bound);
+	const auto &atoms = ListValue::GetChildren(MetadataOption(info, "pruning"));
+	REQUIRE(atoms.size() == 1);
+	const auto &fields = StructValue::GetChildren(atoms[0]);
+	REQUIRE(fields[0] == Value("eq"));
+	REQUIRE(fields[1] == Value::INTEGER(0));
+	REQUIRE(fields[2] == Value::BIGINT(7));
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: callback uses retained state without IO",
+                 "[paimon][snapshot_binding][scan_metadata]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	SQL(writer, "INSERT INTO pm.race.t VALUES (1,10)");
+	auto bound = Bind(reader, warehouse, entry);
+	PushEqual(reader, bound, 1, 10);
+	auto before = ScanMetadata(reader, bound);
+	const auto path = warehouse + "/race.db/t";
+	const auto hidden = warehouse + "/hidden-table";
+	std::filesystem::rename(path, hidden);
+	try {
+		auto after = ScanMetadata(reader, bound);
+		REQUIRE(after.options.size() == before.options.size());
+		for (const auto &option : before.options) {
+			REQUIRE(after.options.at(option.first) == option.second);
+		}
+	} catch (...) {
+		std::filesystem::rename(hidden, path);
+		throw;
+	}
+	std::filesystem::rename(hidden, path);
+	ExpectRows(Read(reader, bound), {{Value(1), Value(10)}});
+}
 
 // Branches share data and manifests at the table root; only metadata is copied.
 static string CopyBranch(const string &path, const string &branch = "dev") {
@@ -757,4 +1136,63 @@ TEST_CASE_METHOD(BindingFixture, "Paimon binding: retained table selectors", "[p
 		ExpectRows(Read(reader, fresh), {{Value(1), Value(10)}, {Value(2), Value(20)}});
 	}
 	SQL(reader, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: invalid native text preserves CPU behavior",
+                 "[paimon][snapshot_binding][scan_metadata][metadata_utf8]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	SQL(writer, "CREATE TABLE pm.race.invalid_text (id INTEGER) WITH ('test.metadata.bytes'='safe')");
+	SQL(writer, "INSERT INTO pm.race.invalid_text VALUES (7)");
+	// Native path binding accepts this unknown option although DuckDB's owned
+	// VARCHAR constructor rejects it. Only this disposable schema is corrupted.
+	const auto path = warehouse + "/race.db/invalid_text/schema/schema-0";
+	std::ifstream input(path, std::ios::binary);
+	string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	input.close();
+	const auto at = bytes.find("\"safe\"");
+	REQUIRE(at != string::npos);
+	bytes.replace(at, 6, string("\"") + char(0xff) + "\"");
+	{
+		std::ofstream output(path, std::ios::binary | std::ios::trunc);
+		output.write(bytes.data(), bytes.size());
+		REQUIRE(output.good());
+	}
+	SQL(reader, "DETACH pm");
+	SQL(reader, "ATTACH " + Value(warehouse).ToSQLString() + " AS pm (TYPE paimon)");
+	if (entry == Entry::CATALOG) {
+		// Preserve the existing catalog's schema-validation error; metadata
+		// refusal must not turn this input into a successful empty table.
+		REQUIRE_THROWS_WITH(Bind(reader, warehouse, entry, "invalid_text"),
+		                    Catch::Contains("Invalid Paimon schema JSON"));
+	} else {
+		auto bound = Bind(reader, warehouse, entry, "invalid_text");
+		BindInfo info(ScanType::EXTERNAL);
+		CHECK_NOTHROW(info = ScanMetadata(reader, bound));
+		CHECK(info.options.empty());
+		ExpectRows(Read(reader, bound), {{Value(7)}});
+	}
+	SQL(reader, "SELECT 42");
+}
+
+TEST_CASE_METHOD(BindingFixture, "Paimon metadata: valid UTF8 options remain available",
+                 "[paimon][snapshot_binding][scan_metadata][metadata_utf8]") {
+	const auto entry = GENERATE(Entry::PATH, Entry::THREE_PART, Entry::CATALOG);
+	const string value = "元数据🙂";
+	SQL(writer, "CREATE TABLE pm.race.valid_text (\"值\" INTEGER) WITH ('test.metadata.bytes'=" +
+	                Value(value).ToSQLString() + ")");
+	SQL(writer, "INSERT INTO pm.race.valid_text VALUES (7)");
+	auto bound = Bind(reader, warehouse, entry, "valid_text");
+	auto info = ScanMetadata(reader, bound);
+	CHECK(MetadataOption(info, "version") == Value::INTEGER(1));
+	bool found = false;
+	for (const auto &option : ListValue::GetChildren(MetadataOption(info, "options"))) {
+		const auto &fields = StructValue::GetChildren(option);
+		if (fields[0].GetValue<string>() == "test.metadata.bytes") {
+			CHECK(fields[1].GetValue<string>() == value);
+			found = true;
+		}
+	}
+	CHECK(found);
+	CHECK(bound.names == vector<Identifier> {"值"});
+	ExpectRows(Read(reader, bound), {{Value(7)}});
 }
