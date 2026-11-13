@@ -655,6 +655,10 @@ static std::shared_ptr<paimon::Cache> GetPaimonScanCache() {
 	return cache;
 }
 
+static bool IsRemotePaimonPath(const std::string &path) {
+	return StringUtil::StartsWith(path, "s3://") || StringUtil::StartsWith(path, "oss://");
+}
+
 static paimon::Result<std::unique_ptr<paimon::TableScan>>
 CreatePaimonScanner(const string &path, const string &schema, const map<string, string> &options,
                     const std::shared_ptr<paimon::Predicate> &predicate = nullptr,
@@ -1046,9 +1050,8 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 		read.deferred_error = scanner.status();
 	}
 	std::optional<PaimonFastSnapshot> fast_snapshot;
-	const bool cache_latest = !requested_snapshot && !timestamp &&
-	                          (StringUtil::StartsWith(read.table_data_path, "s3://") ||
-	                           StringUtil::StartsWith(read.table_data_path, "oss://")) &&
+	const bool remote_path = IsRemotePaimonPath(read.table_data_path);
+	const bool cache_latest = !requested_snapshot && !timestamp && remote_path &&
 	                          read.branch == paimon::Identifier::kDefaultMainBranch;
 	const auto cache_key = cache_latest
 	                           ? LatestSnapshotCacheKey(read.table_data_path, read.table_schema_json, paimon_options)
@@ -1056,7 +1059,7 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	if (cache_latest) {
 		fast_snapshot = GetLatestSnapshot(cache_key);
 	}
-	if (!timestamp && read.branch == paimon::Identifier::kDefaultMainBranch) {
+	if (remote_path && !timestamp && read.branch == paimon::Identifier::kDefaultMainBranch) {
 		if (!fast_snapshot) {
 			const auto checked_at = std::chrono::steady_clock::now();
 			fast_snapshot = TryReadPaimonSnapshotMetadata(read.table_data_path, paimon_options, requested_snapshot);
@@ -1079,7 +1082,7 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 	bool snapshot_identity_verified = false;
 	if (fast_snapshot) {
 		read.snapshot_id = fast_snapshot->snapshot_id;
-		if (append_only) {
+		if (append_only && remote_path) {
 			bind_data->exact_row_count = fast_snapshot->total_record_count;
 		}
 		snapshot_identity_verified = fast_snapshot->schema_id == read.read_schema_id;
@@ -1100,22 +1103,23 @@ static unique_ptr<FunctionData> PaimonScanBind(ClientContext &context, TableFunc
 			for (const auto &snapshot : snapshots.value()) {
 				if (snapshot.snapshot_id == *selected.value()) {
 					snapshot_identity_verified = snapshot.schema_id == read.read_schema_id;
-					if (append_only && snapshot.total_record_count && *snapshot.total_record_count >= 0) {
+					if (append_only && remote_path && snapshot.total_record_count &&
+					    *snapshot.total_record_count >= 0) {
 						bind_data->exact_row_count = *snapshot.total_record_count;
 					}
 					break;
 				}
 			}
-		} else if (append_only) {
+		} else if (append_only && remote_path) {
 			bind_data->exact_row_count = 0;
 		}
 	}
-	// For the default latest-snapshot scan, the selected snapshot's schema id
-	// matches the supplied/bound schema, and the snapshot id pins the scan, so the
-	// second full schema read would only guard against a commit racing this bind.
-	// Skip it. Explicit snapshot/timestamp selectors keep the full check because
-	// the caller may intentionally supply a schema newer than an old snapshot.
-	if (!snapshot_identity_verified) {
+	// Only a caller-supplied schema can skip the second full schema read: it
+	// already states the schema this bind must use and the snapshot id pins the
+	// scan. Without it, keep the original verification, including its catalog
+	// requests, so REST and local bindings retain their observable behavior.
+	const bool supplied_schema_verified = supplied_schema.has_value() && snapshot_identity_verified;
+	if (!supplied_schema_verified) {
 		auto checked_target = PaimonReadTarget::Load(*paimon_catalog, table_identifier, paimon_options);
 		auto checked_path = paimon_catalog->GetTableLocation(target.schema_identifier);
 		if (!checked_target.ok() || !checked_path.ok()) {
@@ -1233,11 +1237,11 @@ static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const 
 	if (!bind.bound_read.snapshot_id) {
 		return {};
 	}
-	// Splits are pure descriptions of one immutable snapshot. The predicate and
-	// partition filters are part of the key, so a filtered scan can reuse them
-	// too without replaying any reader state.
-	const std::string cache_key = SplitCacheKey(bind);
-	{
+	// Splits are pure descriptions of one immutable remote snapshot. Local scans
+	// keep planning so snapshot/manifest removal is detected on every read.
+	const bool cache_splits = IsRemotePaimonPath(bind.ReadPath());
+	const std::string cache_key = cache_splits ? SplitCacheKey(bind) : std::string();
+	if (cache_splits) {
 		std::lock_guard<std::mutex> guard(SplitCacheMutex());
 		auto &cache = SplitCache();
 		auto entry = cache.find(cache_key);
@@ -1258,7 +1262,7 @@ static std::vector<std::shared_ptr<paimon::Split>> CreatePaimonScanSplits(const 
 		throw IOException("Paimon scan no longer resolves to its bound snapshot");
 	}
 	auto splits = plan.value()->Splits();
-	{
+	if (cache_splits) {
 		auto now = std::chrono::steady_clock::now();
 		std::lock_guard<std::mutex> guard(SplitCacheMutex());
 		auto &cache = SplitCache();
@@ -1440,9 +1444,10 @@ static vector<PartitionStatistics> PaimonGetPartitionStats(ClientContext &, GetP
 		return result;
 	}
 
-	// The bound snapshot already carries its exact row count. COUNT(*) is
+	// A remote bound snapshot already carries its exact row count. COUNT(*) is
 	// unfiltered here, so this is the same number the manifest planner would
-	// count, without reading any manifests.
+	// count, without reading any manifests. Local scans keep planning so a
+	// removed snapshot or manifest is reported.
 	if (bind.exact_row_count.has_value()) {
 		PartitionStatistics stats;
 		stats.count = NumericCast<idx_t>(*bind.exact_row_count);
