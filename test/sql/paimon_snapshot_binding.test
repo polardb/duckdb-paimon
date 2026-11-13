@@ -49,6 +49,14 @@ EXPLAIN SELECT * FROM paimon_scan('./data', '__test_binding', 't');
 ----
 physical_plan	<REGEX>:.*Bound Snapshot: 1.*Read Schema: 0.*
 
+# Cached schema JSON avoids another catalog schema read without changing the
+# snapshot selected for local tables or explicit time travel.
+query TI
+SELECT f0, f1 FROM paimon_scan('./data/testdb.db/testtbl', schema_json='{"version":3,"id":0,"fields":[{"id":0,"name":"f0","type":"STRING"},{"id":1,"name":"f1","type":"INT"},{"id":2,"name":"f2","type":"INT"},{"id":3,"name":"f3","type":"DOUBLE"}],"highestFieldId":3,"partitionKeys":[],"primaryKeys":[],"options":{"file-system":"local","file.format":"parquet","manifest.format":"orc"},"timeMillis":1768474103458}') ORDER BY f0 LIMIT 2;
+----
+Alice	1
+Bob	1
+
 statement ok
 PREPARE latest_direct AS SELECT * FROM paimon_scan('./data/__test_binding.db/t') ORDER BY id;
 
