@@ -4,7 +4,7 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 EXT_NAME=paimon
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # DuckDB 2.0 no longer derives its version from git tags; keep in sync with the duckdb submodule.
-OVERRIDE_GIT_DESCRIBE ?= v2.0.0
+OVERRIDE_GIT_DESCRIBE ?= v2.0.1
 ENABLE_EXTENSION_AUTOLOADING ?= 1
 ENABLE_EXTENSION_AUTOINSTALL ?= 1
 
