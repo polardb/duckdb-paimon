@@ -1,7 +1,7 @@
 name: Release Paimon Extension Bundle
 
 env:
-  duckdb_version: v2.0.0
+  duckdb_version: v2.0.1
 
 on:
   push:
