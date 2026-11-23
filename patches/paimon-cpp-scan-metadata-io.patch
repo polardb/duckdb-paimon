@@ -1,0 +1,76 @@
+diff --git a/src/paimon/core/operation/file_store_scan.cpp b/src/paimon/core/operation/file_store_scan.cpp
+index befe7eb9..76dc0b60 100644
+--- a/src/paimon/core/operation/file_store_scan.cpp
++++ b/src/paimon/core/operation/file_store_scan.cpp
+@@ -271,8 +271,30 @@ Status FileStoreScan::ReadManifests(std::optional<Snapshot>* snapshot_ptr,
+ Status FileStoreScan::ReadManifestsWithSnapshot(const Snapshot& snapshot,
+                                                 std::vector<ManifestFileMeta>* manifests) const {
+     switch (scan_mode_) {
+-        case ScanMode::ALL:
+-            return manifest_list_->ReadDataManifests(snapshot, manifests);
++        case ScanMode::ALL: {
++            // Base and delta lists are independent objects. Read them in parallel;
++            // the executor already parallelizes manifest files below.
++            auto read_list = [this, &snapshot](bool base) -> Result<std::vector<ManifestFileMeta>> {
++                std::vector<ManifestFileMeta> result;
++                Status status = base ? manifest_list_->ReadBaseManifests(snapshot, &result)
++                                     : manifest_list_->ReadDeltaManifests(snapshot, &result);
++                if (!status.ok()) {
++                    return status;
++                }
++                return result;
++            };
++            std::vector<std::future<Result<std::vector<ManifestFileMeta>>>> futures;
++            futures.push_back(Via(executor_.get(), [read_list]() { return read_list(true); }));
++            futures.push_back(Via(executor_.get(), [read_list]() { return read_list(false); }));
++            auto lists = CollectAll(futures);
++            for (const auto& list : lists) {
++                if (!list.ok()) {
++                    return list.status();
++                }
++                manifests->insert(manifests->end(), list.value().begin(), list.value().end());
++            }
++            return Status::OK();
++        }
+         case ScanMode::DELTA:
+             return manifest_list_->ReadDeltaManifests(snapshot, manifests);
+         case ScanMode::CHANGELOG:
+@@ -282,7 +304,6 @@ Status FileStoreScan::ReadManifestsWithSnapshot(const Snapshot& snapshot,
+                                           std::to_string(static_cast<int32_t>(scan_mode_)));
+     }
+ }
+-
+ Status FileStoreScan::ReadFileEntries(const std::vector<ManifestFileMeta>& manifest_metas,
+                                       std::vector<ManifestEntry>* manifest_entries,
+                                       bool apply_scan_filter) const {
+diff --git a/src/paimon/core/table/source/snapshot/static_from_snapshot_starting_scanner.h b/src/paimon/core/table/source/snapshot/static_from_snapshot_starting_scanner.h
+index 79ebb79a..794a1090 100644
+--- a/src/paimon/core/table/source/snapshot/static_from_snapshot_starting_scanner.h
++++ b/src/paimon/core/table/source/snapshot/static_from_snapshot_starting_scanner.h
+@@ -38,22 +38,10 @@ class StaticFromSnapshotStartingScanner : public StartingScanner {
+ 
+     Result<std::shared_ptr<ScanResult>> Scan(
+         const std::shared_ptr<SnapshotReader>& snapshot_reader) override {
+-        PAIMON_ASSIGN_OR_RAISE(std::optional<int64_t> earliest,
+-                               snapshot_manager_->EarliestSnapshotId());
+-        PAIMON_ASSIGN_OR_RAISE(std::optional<int64_t> latest,
+-                               snapshot_manager_->LatestSnapshotId());
+-        if (earliest == std::nullopt || latest == std::nullopt) {
+-            PAIMON_LOG_INFO(
+-                logger_, "There is currently no snapshot. Waiting for snapshot generation.%s", "");
+-            return std::make_shared<StartingScanner::NoSnapshot>();
+-        }
+-        if (starting_snapshot_id_.value() < earliest.value() ||
+-            starting_snapshot_id_.value() > latest.value()) {
+-            return Status::Invalid(
+-                fmt::format("The specified scan snapshotId {} is out of "
+-                            "available snapshotId range [{}, {}].",
+-                            starting_snapshot_id_.value(), earliest.value(), latest.value()));
+-        }
++        // The snapshot id is already resolved against the table metadata by the
++        // caller. Load it directly: probing EARLIEST/LATEST here costs several
++        // object-store round trips per query and LoadSnapshot already reports a
++        // missing/expired snapshot.
+         PAIMON_ASSIGN_OR_RAISE(Snapshot snapshot,
+                                snapshot_manager_->LoadSnapshot(starting_snapshot_id_.value()));
+         PAIMON_ASSIGN_OR_RAISE(

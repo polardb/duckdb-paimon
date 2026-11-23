@@ -222,6 +222,10 @@ map<string, string> PaimonCatalog::GetPaimonOptions(ClientContext &context, cons
 	}
 
 	paimon_options.insert({paimon::Options::READ_BATCH_SIZE, std::to_string(STANDARD_VECTOR_SIZE)});
+	// Repeat scans of the same snapshot reuse manifest entries through the
+	// shared scan cache instead of re-reading every manifest from storage.
+	// paimon-cpp disables this cache by default.
+	paimon_options[paimon::Options::SCAN_MANIFEST_ENTRY_CACHE_MAX_SNAPSHOTS] = "1";
 
 	auto snap_id = TryGetPaimonOptionValue(input_options, "snapshot_from_id");
 	auto snap_ts = TryGetPaimonOptionValue(input_options, "snapshot_from_timestamp");

@@ -1,0 +1,31 @@
+diff --git a/include/paimon/schema/schema.h b/include/paimon/schema/schema.h
+index e3f557ff..1f17c3e5 100644
+--- a/include/paimon/schema/schema.h
++++ b/include/paimon/schema/schema.h
+@@ -65,6 +65,9 @@ class PAIMON_EXPORT Schema {
+     virtual std::optional<std::string> Comment() const = 0;
+ };
+ 
++class DataSchema;
++PAIMON_EXPORT Result<std::shared_ptr<DataSchema>> CreateDataSchemaFromJson(const std::string& json);
++
+ /// Schema contract for data tables.
+ class PAIMON_EXPORT DataSchema : public Schema {
+  public:
+diff --git a/src/paimon/core/schema/table_schema.cpp b/src/paimon/core/schema/table_schema.cpp
+index 6e2d8747..0311eb7c 100644
+--- a/src/paimon/core/schema/table_schema.cpp
++++ b/src/paimon/core/schema/table_schema.cpp
+@@ -46,6 +46,12 @@
+ 
+ namespace paimon {
+ 
++Result<std::shared_ptr<DataSchema>> CreateDataSchemaFromJson(const std::string& json) {
++    auto result = TableSchema::CreateFromJson(json);
++    if (!result.ok()) return result.status();
++    return std::shared_ptr<DataSchema>(std::move(result).value().release());
++}
++
+ Result<std::unique_ptr<TableSchema>> TableSchema::Create(
+     int64_t schema_id, const std::shared_ptr<arrow::Schema>& schema,
+     const std::vector<std::string>& partition_keys, const std::vector<std::string>& primary_keys,

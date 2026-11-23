@@ -1,0 +1,28 @@
+diff --git a/include/paimon/cache/cache.h b/include/paimon/cache/cache.h
+index 5bff2a12..a8e2bea0 100644
+--- a/include/paimon/cache/cache.h
++++ b/include/paimon/cache/cache.h
+@@ -89,6 +89,8 @@ class PAIMON_EXPORT Cache {
+     virtual size_t Size() const = 0;
+ };
+ 
++PAIMON_EXPORT std::shared_ptr<Cache> CreateLruCache(int64_t max_weight);
++
+ class PAIMON_EXPORT CacheValue {
+  public:
+     CacheValue(const MemorySegment& segment, CacheCallback callback);
+diff --git a/src/paimon/common/io/cache/lru_cache.cpp b/src/paimon/common/io/cache/lru_cache.cpp
+index fbfca83c..3ab6c6c6 100644
+--- a/src/paimon/common/io/cache/lru_cache.cpp
++++ b/src/paimon/common/io/cache/lru_cache.cpp
+@@ -20,6 +20,10 @@
+ 
+ namespace paimon {
+ 
++std::shared_ptr<Cache> CreateLruCache(int64_t max_weight) {
++    return std::make_shared<LruCache>(max_weight);
++}
++
+ LruCache::LruCache(int64_t max_weight)
+     : inner_cache_(InnerCache::Options{
+           .max_weight = max_weight,
