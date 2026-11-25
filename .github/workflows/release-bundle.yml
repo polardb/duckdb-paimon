@@ -34,7 +34,7 @@ jobs:
             manylinux_image: aarch64
             vcpkg_triplet: arm64-linux-release
           - bundle_arch: osx-arm64
-            runner: macos-14
+            runner: macos-15
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
