@@ -267,22 +267,31 @@ if(BUILD_UNITTESTS)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
     DEPENDS unittest_paimon
     USES_TERMINAL)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND ENABLE_EXTENSION_LOAD AND NOT DUCKDB_LOADABLE_FROM_ARCHIVE)
-    add_executable(
-      unittest_paimon_loadable EXCLUDE_FROM_ALL
-      test/cpp/main.cpp test/cpp/paimon_scan_definitions.cpp)
-    target_include_directories(unittest_paimon_loadable PRIVATE
-                               ${CMAKE_SOURCE_DIR}/third_party/catch)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+     AND ENABLE_EXTENSION_LOAD
+     AND NOT DUCKDB_LOADABLE_FROM_ARCHIVE)
+    add_executable(unittest_paimon_loadable EXCLUDE_FROM_ALL
+                   test/cpp/main.cpp test/cpp/paimon_scan_definitions.cpp)
+    target_include_directories(unittest_paimon_loadable
+                               PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
     target_compile_definitions(
-      unittest_paimon_loadable PRIVATE
-      PAIMON_TEST_LOADABLE_PATH="$<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>"
-      PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
-    # The capability target is declared after DuckDB configures extension directories.
-    # Register just that capability so this test host cannot use a static Paimon.
-    set(paimon_test_loader "${CMAKE_CURRENT_BINARY_DIR}/paimon_test_static_loader.c")
-    duckdb_write_static_extension_loader("${paimon_test_loader}" loadable_extensions)
-    target_sources(unittest_paimon_loadable PRIVATE "${paimon_test_loader}"
-                   "${DUCKDB_MODULE_BASE_DIR}/extension/loader/static_extension_autoregister.cpp")
+      unittest_paimon_loadable
+      PRIVATE
+        PAIMON_TEST_LOADABLE_PATH="$<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>"
+        PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+    # The capability target is declared after DuckDB configures extension
+    # directories. Register just that capability so this test host cannot use a
+    # static Paimon.
+    set(paimon_test_loader
+        "${CMAKE_CURRENT_BINARY_DIR}/paimon_test_static_loader.c")
+    duckdb_write_static_extension_loader("${paimon_test_loader}"
+                                         loadable_extensions)
+    target_sources(
+      unittest_paimon_loadable
+      PRIVATE
+        "${paimon_test_loader}"
+        "${DUCKDB_MODULE_BASE_DIR}/extension/loader/static_extension_autoregister.cpp"
+    )
     target_link_libraries(unittest_paimon_loadable duckdb_static
                           duckdb_loadable_extensions ${CMAKE_DL_LIBS})
     link_threads(unittest_paimon_loadable "")
@@ -290,11 +299,14 @@ if(BUILD_UNITTESTS)
     add_dependencies(unittest_paimon_loadable ${LOADABLE_EXTENSION_NAME})
     add_custom_target(
       paimon_check_scan_definitions
-      COMMAND "${CMAKE_COMMAND}" "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon_loadable>"
-        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/loadable-test-work"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon_loadable>"
+        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/loadable-test-work" -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
       DEPENDS unittest_paimon_loadable)
-    add_dependencies(paimon_check_snapshot_binding paimon_check_scan_definitions)
+    add_dependencies(paimon_check_snapshot_binding
+                     paimon_check_scan_definitions)
   endif()
 endif()
 if(APPLE)
