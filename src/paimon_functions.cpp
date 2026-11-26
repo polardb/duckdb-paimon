@@ -24,9 +24,6 @@
 
 #include "paimon_functions.hpp"
 
-#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
-#include "duckdb/main/extension/extension_loader.hpp"
-
 #include "paimon/catalog/catalog.h"
 #include "yyjson.hpp"
 
@@ -122,7 +119,7 @@ PaimonTablePath PaimonTablePath::Parse(const vector<Value> &inputs) {
 	return result;
 }
 
-void PaimonFunctions::RegisterTableFunction(ExtensionLoader &loader, CreateTableFunctionInfo info) {
+CreateTableFunctionInfo PaimonFunctions::NormalizeTableFunction(CreateTableFunctionInfo info) {
 	D_ASSERT(info.functions.Size() == info.descriptions.size());
 	idx_t function_idx = 0;
 	info.functions.ApplyToFunctions([&](TableFunction &fun) {
@@ -135,7 +132,7 @@ void PaimonFunctions::RegisterTableFunction(ExtensionLoader &loader, CreateTable
 			desc.parameter_types.push_back(signature.GetParameter(i).GetType());
 		}
 	});
-	loader.RegisterFunction(std::move(info));
+	return info;
 }
 
 } // namespace duckdb

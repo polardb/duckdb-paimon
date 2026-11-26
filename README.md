@@ -337,3 +337,12 @@ See the [contributing guide](CONTRIBUTING.md) for how to report issues and submi
 We welcome contributions and discussions! If you have questions, ideas, or want to connect with other users and developers, join our community by clicking [here](https://qr.dingtalk.com/action/joingroup?code=v1,k1,xL7wNtAi3J83o8gW/R+2vl0twZAzSwohxbXwCwQG6v8=&_dt_no_comment=1&origin=11) or scan the QR code below:
 
 <img src="./docs/group-qrcode.png" alt="DingTalk Group QR Code" width="240">
+
+### Scan definition inspection
+
+On supported Linux loadable builds, native consumers can resolve
+`paimon_visit_scan_definitions_v1` from the verified, already loaded Paimon
+module. The visitor receives both canonical `paimon_scan` overloads before
+DuckDB catalog qualification. This interface uses the matching DuckDB C++ ABI.
+See [the declaration](src/include/paimon_scan_definitions.hpp) for ownership and
+failure semantics. It does not initialize another database or bind a scan.

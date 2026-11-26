@@ -25,8 +25,12 @@
 #include "paimon_catalog.hpp"
 #include "paimon_extension.hpp"
 #include "paimon_functions.hpp"
+#include "paimon_scan_definitions.hpp"
+
+#include <new>
 
 #include "duckdb.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
@@ -61,6 +65,10 @@ static unique_ptr<BaseSecret> CreatePaimonSecretFromConfig(ClientContext &contex
 	return std::move(result);
 }
 
+static CreateTableFunctionInfo GetNormalizedPaimonScanFunction() {
+	return PaimonFunctions::NormalizeTableFunction(PaimonFunctions::GetPaimonScanFunction());
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	SecretType secret_type;
 	secret_type.name = "paimon";
@@ -86,8 +94,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	credential_chain_fun.named_parameters["path_style_access"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(credential_chain_fun);
 
-	PaimonFunctions::RegisterTableFunction(loader, PaimonFunctions::GetPaimonScanFunction());
-	PaimonFunctions::RegisterTableFunction(loader, PaimonFunctions::GetPaimonSnapshotsFunction());
+	loader.RegisterFunction(GetNormalizedPaimonScanFunction());
+	loader.RegisterFunction(PaimonFunctions::NormalizeTableFunction(PaimonFunctions::GetPaimonSnapshotsFunction()));
 
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
@@ -109,3 +117,28 @@ DUCKDB_CPP_EXTENSION_ENTRY(paimon, loader) {
 	LoadInternal(loader);
 }
 }
+
+#if defined(__linux__)
+extern "C" DUCKDB_EXTENSION_API duckdb::PaimonScanDefinitionStatusV1
+paimon_visit_scan_definitions_v1(void *context, duckdb::PaimonScanDefinitionVisitorV1 visitor) noexcept {
+	using duckdb::PaimonScanDefinitionStatusV1;
+	if (!visitor) {
+		return PaimonScanDefinitionStatusV1::INVALID_ARGUMENT;
+	}
+	try {
+		auto info = duckdb::GetNormalizedPaimonScanFunction();
+		for (const auto &definition : info.functions.functions) {
+			if (!visitor(context, definition.get())) {
+				return PaimonScanDefinitionStatusV1::VISITOR_REJECTED;
+			}
+		}
+		return PaimonScanDefinitionStatusV1::OK;
+	} catch (const std::bad_alloc &) {
+		return PaimonScanDefinitionStatusV1::OUT_OF_MEMORY;
+	} catch (const duckdb::OutOfMemoryException &) {
+		return PaimonScanDefinitionStatusV1::OUT_OF_MEMORY;
+	} catch (...) {
+		return PaimonScanDefinitionStatusV1::INTERNAL_ERROR;
+	}
+}
+#endif
