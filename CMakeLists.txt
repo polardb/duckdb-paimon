@@ -267,6 +267,30 @@ if(BUILD_UNITTESTS)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
     DEPENDS unittest_paimon
     USES_TERMINAL)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET duckdb_loadable_extensions
+     AND NOT DUCKDB_LOADABLE_FROM_ARCHIVE)
+    add_executable(
+      unittest_paimon_loadable EXCLUDE_FROM_ALL
+      test/cpp/main.cpp test/cpp/paimon_scan_definitions.cpp)
+    target_include_directories(unittest_paimon_loadable PRIVATE
+                               ${CMAKE_SOURCE_DIR}/third_party/catch)
+    target_compile_definitions(
+      unittest_paimon_loadable PRIVATE
+      PAIMON_TEST_LOADABLE_PATH="$<TARGET_FILE:${LOADABLE_EXTENSION_NAME}>"
+      PAIMON_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+    target_link_libraries(unittest_paimon_loadable duckdb_static ${CMAKE_DL_LIBS})
+    duckdb_link_extensions(unittest_paimon_loadable loadable_extensions)
+    link_threads(unittest_paimon_loadable "")
+    set_target_properties(unittest_paimon_loadable PROPERTIES ENABLE_EXPORTS ON)
+    add_dependencies(unittest_paimon_loadable ${LOADABLE_EXTENSION_NAME})
+    add_custom_target(
+      paimon_check_scan_definitions
+      COMMAND "${CMAKE_COMMAND}" "-DTEST_BINARY=$<TARGET_FILE:unittest_paimon_loadable>"
+        "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/loadable-test-work"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/run_snapshot_binding.cmake"
+      DEPENDS unittest_paimon_loadable)
+    add_dependencies(paimon_check_snapshot_binding paimon_check_scan_definitions)
+  endif()
 endif()
 if(APPLE)
   target_link_options(
