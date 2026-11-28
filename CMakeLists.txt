@@ -28,7 +28,10 @@ file(MAKE_DIRECTORY ${PAIMON_CPP_INCLUDE})
 
 set(PAIMON_CPP_PATCHES
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-install-arrow-headers.patch
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-s3-virtual-host-addressing.patch)
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-s3-virtual-host-addressing.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-public-lru-cache.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-public-schema-factory.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/paimon-cpp-scan-metadata-io.patch)
 
 # Build patch command: apply each patch idempotently. Each reverse-check/apply
 # pair is parenthesized so a patch that fails to apply stops the build instead of
@@ -104,6 +107,7 @@ endif()
 ExternalProject_Add(paimon_cpp_ep
   SOURCE_DIR ${PAIMON_CPP_SOURCE_DIR}
   BINARY_DIR ${PAIMON_CPP_BUILD_DIR}
+  BUILD_ALWAYS 1
   PATCH_COMMAND
     sh -c "${PAIMON_CPP_PATCH_SCRIPT}"
   CMAKE_ARGS
